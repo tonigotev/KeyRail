@@ -3,9 +3,9 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    env,
-    fs,
-    path::PathBuf,
+    collections::HashSet,
+    env, fs,
+    path::{Path, PathBuf},
     process::Command,
     thread,
     time::Duration,
@@ -16,7 +16,9 @@ use std::os::windows::ffi::OsStrExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+};
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, MoveFileExW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL,
@@ -74,7 +76,8 @@ fn ensure_config_file() -> Result<PathBuf, String> {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     if !path.exists() {
-        let text = serde_json::to_string_pretty(&default_config()).map_err(|error| error.to_string())?;
+        let text =
+            serde_json::to_string_pretty(&default_config()).map_err(|error| error.to_string())?;
         fs::write(&path, text).map_err(|error| error.to_string())?;
     }
     Ok(path)
@@ -128,16 +131,51 @@ fn replace_file(temp: &PathBuf, path: &PathBuf) -> Result<(), String> {
 
 fn daemon_candidates() -> Vec<PathBuf> {
     let mut paths = Vec::new();
+    let mut seen = HashSet::new();
 
-    if let Ok(exe) = env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("hotkeyd.exe"));
+    fn push_candidate(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+        if seen.insert(path.clone()) {
+            paths.push(path);
         }
     }
 
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    if let Some(root) = manifest_dir.parent().and_then(|ui| ui.parent()) {
-        paths.push(root.join("hotkey_to_command_cpp").join("build").join("Release").join("hotkeyd.exe"));
+    fn push_repo_candidates(paths: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, base: &Path) {
+        for ancestor in base.ancestors() {
+            push_candidate(
+                paths,
+                seen,
+                ancestor
+                    .join("hotkey_to_command_cpp")
+                    .join("build")
+                    .join("Release")
+                    .join("hotkeyd.exe"),
+            );
+            push_candidate(
+                paths,
+                seen,
+                ancestor
+                    .join("hotkey_to_command_cpp")
+                    .join("build")
+                    .join("Debug")
+                    .join("hotkeyd.exe"),
+            );
+        }
+    }
+
+    if let Some(path) = env::var_os("HOTKEYD_PATH") {
+        push_candidate(&mut paths, &mut seen, PathBuf::from(path));
+    }
+
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            push_candidate(&mut paths, &mut seen, dir.join("hotkeyd.exe"));
+            push_repo_candidates(&mut paths, &mut seen, dir);
+        }
+    }
+
+    if let Ok(current_dir) = env::current_dir() {
+        push_candidate(&mut paths, &mut seen, current_dir.join("hotkeyd.exe"));
+        push_repo_candidates(&mut paths, &mut seen, &current_dir);
     }
 
     paths
@@ -218,7 +256,11 @@ fn send_daemon_command(command: String) -> Result<String, String> {
     let response = send_pipe_raw(&command)?;
     let value: Value = serde_json::from_str(&response).map_err(|error| error.to_string())?;
     if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
-        return Err(value.get("message").and_then(Value::as_str).unwrap_or("daemon command failed").to_string());
+        return Err(value
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or("daemon command failed")
+            .to_string());
     }
     Ok(value
         .get("status")
@@ -237,7 +279,14 @@ fn ensure_daemon() -> Result<(), String> {
     let daemon = daemon_candidates()
         .into_iter()
         .find(|path| path.exists())
-        .ok_or("could not find hotkeyd.exe; build the C++ daemon first")?;
+        .ok_or_else(|| {
+            let searched = daemon_candidates()
+                .into_iter()
+                .map(|path| format!("  {}", path.display()))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!("could not find hotkeyd.exe; build the C++ daemon first\nsearched:\n{searched}")
+        })?;
 
     let mut command = Command::new(daemon);
     #[cfg(windows)]
