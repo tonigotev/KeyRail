@@ -1,0 +1,34 @@
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# C++ / CMake build output
+hotkey_to_command_cpp/build/
+hotkey_to_command_cpp/out/
+hotkey_to_command_cpp/.vs/
+*.obj
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.exp
+
+# Node / Vite / Svelte output
+hotkey_to_command_ui/node_modules/
+hotkey_to_command_ui/dist/
+hotkey_to_command_ui/.svelte-kit/
+hotkey_to_command_ui/.vite/
+
+# Rust / Tauri output
+hotkey_to_command_ui/src-tauri/target/
+hotkey_to_command_ui/src-tauri/gen/
+
+# Local runtime config
+config.json
+*.tmp
+*.log
