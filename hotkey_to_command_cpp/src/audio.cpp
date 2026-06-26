@@ -64,6 +64,12 @@ static std::wstring friendlyName(IMMDevice* dev, const std::wstring& fallback) {
     return name;
 }
 
+static std::wstring defaultDeviceId(IMMDeviceEnumerator* enumr, ERole role) {
+    ComPtr<IMMDevice> def;
+    if (FAILED(enumr->GetDefaultAudioEndpoint(eRender, role, &def))) return {};
+    return deviceId(def.Get());
+}
+
 bool cycleAudioDevice(std::wstring* outName) {
     ComInit com;
 
@@ -91,25 +97,35 @@ bool cycleAudioDevice(std::wstring* outName) {
     }
     if (ids.empty()) return false;
 
-    // current default
-    std::wstring current;
-    ComPtr<IMMDevice> def;
-    if (SUCCEEDED(enumr->GetDefaultAudioEndpoint(eRender, eMultimedia, &def)))
-        current = deviceId(def.Get());
+    // Windows Settings' output picker follows the console render role. The
+    // multimedia role can disagree, which makes the UI flicker without the
+    // visible selected output changing.
+    std::wstring current = defaultDeviceId(enumr.Get(), eConsole);
+    if (current.empty()) current = defaultDeviceId(enumr.Get(), eMultimedia);
 
     size_t idx = 0; bool found = false;
     for (size_t i = 0; i < ids.size(); ++i)
         if (ids[i] == current) { idx = i; found = true; break; }
-    size_t next = found ? (idx + 1) % ids.size() : 0;
 
     ComPtr<IPolicyConfig> policy;
     if (FAILED(CoCreateInstance(CLSID_CPolicyConfigClient, nullptr,
                                 CLSCTX_ALL, IID_PPV_ARGS(&policy))))
         return false;
 
-    for (ERole role : {eConsole, eMultimedia, eCommunications})
-        policy->SetDefaultEndpoint(ids[next].c_str(), role);
+    for (size_t offset = 1; offset <= ids.size(); ++offset) {
+        size_t next = found ? (idx + offset) % ids.size() : (offset - 1);
+        if (FAILED(policy->SetDefaultEndpoint(ids[next].c_str(), eConsole))) continue;
 
-    if (outName) *outName = names[next];
-    return true;
+        // Keep the other roles aligned when Windows allows it, but do not let
+        // one of them trap the visible output picker on the previous device.
+        policy->SetDefaultEndpoint(ids[next].c_str(), eMultimedia);
+        policy->SetDefaultEndpoint(ids[next].c_str(), eCommunications);
+
+        if (defaultDeviceId(enumr.Get(), eConsole) == ids[next]) {
+            if (outName) *outName = names[next];
+            return true;
+        }
+    }
+
+    return false;
 }
