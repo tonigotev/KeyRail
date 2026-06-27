@@ -17,8 +17,8 @@ struct Runnable {
 // ---- shared process-launch plumbing ----------------------------------------
 class Script : public Runnable {
 public:
-    Script(std::wstring path, std::vector<std::wstring> args = {}, bool showWindow = false)
-        : path_(std::move(path)), args_(std::move(args)), showWindow_(showWindow) {}
+    Script(std::wstring path, std::vector<std::wstring> args = {}, bool showWindow = false, std::wstring workingDir = L"")
+        : path_(std::move(path)), args_(std::move(args)), showWindow_(showWindow), workingDir_(std::move(workingDir)) {}
 
     void run() override {
         std::wstring cmd = buildCommand();          // <- the only per-type bit
@@ -30,7 +30,7 @@ public:
         DWORD flags = showWindow_ ? 0 : CREATE_NO_WINDOW;
 
         if (CreateProcessW(nullptr, buf.data(), nullptr, nullptr, FALSE,
-                           flags, nullptr, nullptr, &si, &pi)) {
+                           flags, nullptr, workingDir_.empty() ? nullptr : workingDir_.c_str(), &si, &pi)) {
             CloseHandle(pi.hThread);
             CloseHandle(pi.hProcess);               // fire and forget
         }
@@ -55,6 +55,7 @@ protected:
     std::wstring path_;
     std::vector<std::wstring> args_;
     bool showWindow_;
+    std::wstring workingDir_;
 };
 
 class PythonScript : public Script {
@@ -88,6 +89,31 @@ public:
     std::wstring buildCommand() override {
         return quoted(path_) + joinedArgs();
     }
+};
+
+class PlannedScript : public Script {
+public:
+    PlannedScript(std::wstring program,
+                  std::vector<std::wstring> prefixArgs,
+                  std::wstring path,
+                  std::vector<std::wstring> args = {},
+                  bool showWindow = false,
+                  std::wstring workingDir = L"")
+        : Script(std::move(path), std::move(args), showWindow, std::move(workingDir)),
+          program_(std::move(program)),
+          prefixArgs_(std::move(prefixArgs)) {}
+
+    std::wstring buildCommand() override {
+        std::wstring cmd = quoted(program_);
+        for (const auto& arg : prefixArgs_) {
+            cmd += L" " + quoted(arg);
+        }
+        return cmd + L" " + quoted(path_) + joinedArgs();
+    }
+
+private:
+    std::wstring program_;
+    std::vector<std::wstring> prefixArgs_;
 };
 
 // ---- raw command line (the one injection surface) --------------------------

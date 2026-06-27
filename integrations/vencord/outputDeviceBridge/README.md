@@ -32,19 +32,36 @@ Start Hotkey To Command. The daemon listens on:
 ws://127.0.0.1:8787
 ```
 
-In Hotkey To Command, bind a hotkey to:
+In Hotkey To Command, bind a hotkey to one of:
 
 ```text
 Cycle Discord output
+Cycle Discord microphone input
 ```
 
-When pressed, the daemon sends:
+When pressed, the daemon sends one of:
 
 ```text
 cycle_output_device
+cycle_input_device
 ```
 
-The plugin receives it and calls Discord's own `setOutputDevice` path.
+The plugin receives it and calls Discord's own `setOutputDevice` or `setInputDevice` path.
+
+Supported bridge commands:
+
+```text
+cycle_output_device
+cycle_input_device
+next
+prev
+next_input
+prev_input
+list
+list_input
+{"cmd":"set","id":"output-device-id"}
+{"cmd":"set_input","id":"input-device-id"}
+```
 
 ## Notes
 

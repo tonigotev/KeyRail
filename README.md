@@ -91,3 +91,15 @@ The UI starts the daemon if needed and talks to it through:
 - `Stop` in the UI sends `{ "command": "quit" }` to the daemon.
 - `Status` asks the daemon for currently armed bindings.
 - `Ctrl+Alt+Q` is still available as a debug quit hotkey while the console daemon is running.
+
+## Later Installer Plan
+
+When packaging the app, add an optional "Discord support" setup path:
+
+- Detect Discord Stable/PTB/Canary installs.
+- Download or locate a Vencord source checkout.
+- Install missing build tools such as Git, Node.js, and pnpm when the user approves.
+- Copy `integrations/vencord/outputDeviceBridge` into `Vencord/src/userplugins/outputDeviceBridge`.
+- Build and inject Vencord, then restart Discord.
+- Verify that the Hotkey To Command bridge is reachable on `127.0.0.1:8787`.
+- Show the user a checklist for enabling `OutputDeviceBridge` in Vencord and testing the hotkey.

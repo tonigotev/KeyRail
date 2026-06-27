@@ -8,8 +8,11 @@ struct ActionSpec {
     std::wstring name;
     std::wstring path;
     std::wstring command;
+    std::wstring workingDir;
+    std::wstring interpreter;
     std::vector<std::wstring> args;
     bool showWindow = false;
+    bool strongClose = false;
 };
 
 struct BindingSpec {

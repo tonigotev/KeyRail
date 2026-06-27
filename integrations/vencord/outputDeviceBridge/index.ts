@@ -6,7 +6,7 @@ import { findByPropsLazy, findStoreLazy } from "@webpack";
 const log = new Logger("OutputDeviceBridge");
 
 const MediaEngineStore = findStoreLazy("MediaEngineStore");
-const AudioActions = findByPropsLazy("setOutputDevice");
+const AudioActions = findByPropsLazy("setOutputDevice", "setInputDevice");
 
 const settings = definePluginSettings({
     port: {
@@ -26,6 +26,10 @@ function outputDevices(): Record<string, { name?: string; id?: string; }> {
     return MediaEngineStore.getOutputDevices?.() ?? {};
 }
 
+function inputDevices(): Record<string, { name?: string; id?: string; }> {
+    return MediaEngineStore.getInputDevices?.() ?? {};
+}
+
 function orderedOutputIds(): string[] {
     let ids = Object.keys(outputDevices());
     if (!settings.store.includeDefault) {
@@ -34,8 +38,20 @@ function orderedOutputIds(): string[] {
     return ids.sort();
 }
 
-function deviceName(id: string): string {
+function orderedInputIds(): string[] {
+    let ids = Object.keys(inputDevices());
+    if (!settings.store.includeDefault) {
+        ids = ids.filter(id => id !== "default" && id !== "communications");
+    }
+    return ids.sort();
+}
+
+function outputName(id: string): string {
     return outputDevices()[id]?.name ?? id;
+}
+
+function inputName(id: string): string {
+    return inputDevices()[id]?.name ?? id;
 }
 
 function setOutput(id: string): string {
@@ -48,7 +64,17 @@ function setOutput(id: string): string {
     return "engine";
 }
 
-function cycle(dir: 1 | -1 = 1): string | null {
+function setInput(id: string): string {
+    if (AudioActions?.setInputDevice) {
+        AudioActions.setInputDevice(id);
+        return "action";
+    }
+
+    MediaEngineStore.getMediaEngine().setInputDevice(id);
+    return "engine";
+}
+
+function cycleOutput(dir: 1 | -1 = 1): string | null {
     const ids = orderedOutputIds();
     if (!ids.length) {
         log.warn("no output devices found");
@@ -61,11 +87,28 @@ function cycle(dir: 1 | -1 = 1): string | null {
 
     const next = ids[(index + dir + ids.length) % ids.length];
     const method = setOutput(next);
-    log.info(`cycled ${dir > 0 ? "next" : "previous"} to ${deviceName(next)} via ${method}`);
+    log.info(`cycled output ${dir > 0 ? "next" : "previous"} to ${outputName(next)} via ${method}`);
     return next;
 }
 
-function handle(raw: string): { id: string | null; name?: string; devices?: Array<{ id: string; name: string; }>; } {
+function cycleInput(dir: 1 | -1 = 1): string | null {
+    const ids = orderedInputIds();
+    if (!ids.length) {
+        log.warn("no input devices found");
+        return null;
+    }
+
+    const current = MediaEngineStore.getInputDeviceId?.();
+    let index = ids.indexOf(current);
+    if (index === -1) index = 0;
+
+    const next = ids[(index + dir + ids.length) % ids.length];
+    const method = setInput(next);
+    log.info(`cycled input ${dir > 0 ? "next" : "previous"} to ${inputName(next)} via ${method}`);
+    return next;
+}
+
+function handle(raw: string): { id: string | null; name?: string; kind?: "input" | "output"; devices?: Array<{ id: string; name: string; kind: "input" | "output"; }>; } {
     let command = raw.trim();
     let id: string | undefined;
 
@@ -78,13 +121,23 @@ function handle(raw: string): { id: string | null; name?: string; devices?: Arra
     }
 
     let target: string | null = null;
+    let kind: "input" | "output" = "output";
     switch (command) {
         case "cycle_output_device":
         case "next":
-            target = cycle(1);
+            target = cycleOutput(1);
             break;
         case "prev":
-            target = cycle(-1);
+            target = cycleOutput(-1);
+            break;
+        case "cycle_input_device":
+        case "next_input":
+            kind = "input";
+            target = cycleInput(1);
+            break;
+        case "prev_input":
+            kind = "input";
+            target = cycleInput(-1);
             break;
         case "set":
             if (id) {
@@ -92,16 +145,29 @@ function handle(raw: string): { id: string | null; name?: string; devices?: Arra
                 target = id;
             }
             break;
+        case "set_input":
+            kind = "input";
+            if (id) {
+                setInput(id);
+                target = id;
+            }
+            break;
         case "list":
             return {
                 id: null,
-                devices: orderedOutputIds().map(deviceId => ({ id: deviceId, name: deviceName(deviceId) })),
+                devices: orderedOutputIds().map(deviceId => ({ id: deviceId, name: outputName(deviceId), kind: "output" })),
+            };
+        case "list_input":
+            return {
+                id: null,
+                kind: "input",
+                devices: orderedInputIds().map(deviceId => ({ id: deviceId, name: inputName(deviceId), kind: "input" })),
             };
         default:
             log.warn("unknown command:", command);
     }
 
-    return { id: target, name: target ? deviceName(target) : undefined };
+    return { id: target, kind, name: target ? (kind === "input" ? inputName(target) : outputName(target)) : undefined };
 }
 
 let ws: WebSocket | null = null;
@@ -138,7 +204,7 @@ function connect() {
 
 export default definePlugin({
     name: "OutputDeviceBridge",
-    description: "Connects to Hotkey To Command and lets it cycle/set Discord's output device.",
+    description: "Connects to Hotkey To Command and lets it cycle/set Discord's output and input devices.",
     authors: [{ name: "Antonio", id: 0n }],
     settings,
 

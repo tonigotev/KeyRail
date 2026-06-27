@@ -6,7 +6,202 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <array>
 #include <cstdio>
+#include <cwctype>
+#include <filesystem>
+#include <sstream>
+
+static std::wstring lowerCopy(std::wstring value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](wchar_t c) {
+        return static_cast<wchar_t>(towlower(c));
+    });
+    return value;
+}
+
+static std::wstring extensionOf(const std::wstring& path) {
+    return lowerCopy(std::filesystem::path(path).extension().wstring());
+}
+
+static std::unique_ptr<Runnable> makeScriptAction(const ActionSpec& spec) {
+    const std::wstring interpreter = lowerCopy(spec.interpreter);
+    if (interpreter == L"direct") {
+        return std::make_unique<ExecutableScript>(spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+    if (!spec.interpreter.empty() && interpreter != L"auto") {
+        return std::make_unique<PlannedScript>(
+            spec.interpreter,
+            std::vector<std::wstring>{},
+            spec.path,
+            spec.args,
+            spec.showWindow,
+            spec.workingDir);
+    }
+
+    const std::wstring ext = extensionOf(spec.path);
+    if (ext == L".exe" || ext == L".com") {
+        return std::make_unique<ExecutableScript>(spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+    if (ext == L".py" || ext == L".pyw") {
+        return std::make_unique<PlannedScript>(L"py.exe", std::vector<std::wstring>{L"-3"}, spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+    if (ext == L".ps1") {
+        return std::make_unique<PlannedScript>(
+            L"powershell.exe",
+            std::vector<std::wstring>{L"-NoProfile", L"-ExecutionPolicy", L"Bypass", L"-File"},
+            spec.path,
+            spec.args,
+            spec.showWindow,
+            spec.workingDir);
+    }
+    if (ext == L".bat" || ext == L".cmd") {
+        return std::make_unique<PlannedScript>(L"cmd.exe", std::vector<std::wstring>{L"/c"}, spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+    if (ext == L".js" || ext == L".mjs" || ext == L".cjs") {
+        return std::make_unique<PlannedScript>(L"node.exe", std::vector<std::wstring>{}, spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+    if (ext == L".vbs" || ext == L".wsf") {
+        return std::make_unique<PlannedScript>(L"wscript.exe", std::vector<std::wstring>{}, spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+    if (ext == L".ahk") {
+        return std::make_unique<PlannedScript>(L"AutoHotkey.exe", std::vector<std::wstring>{}, spec.path, spec.args, spec.showWindow, spec.workingDir);
+    }
+
+    return std::make_unique<ExecutableScript>(spec.path, spec.args, spec.showWindow, spec.workingDir);
+}
+
+static std::wstring focusedProcessName(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) return {};
+
+    wchar_t path[MAX_PATH]{};
+    DWORD size = MAX_PATH;
+    std::wstring name;
+    if (QueryFullProcessImageNameW(process, 0, path, &size)) {
+        name = lowerCopy(std::filesystem::path(std::wstring(path, size)).filename().wstring());
+    }
+
+    CloseHandle(process);
+    return name;
+}
+
+static bool isProtectedProcess(const std::wstring& name) {
+    static constexpr std::array<const wchar_t*, 12> protectedNames = {
+        L"csrss.exe",
+        L"dwm.exe",
+        L"explorer.exe",
+        L"hotkey_to_command_ui.exe",
+        L"hotkeyd.exe",
+        L"lsass.exe",
+        L"services.exe",
+        L"smss.exe",
+        L"system",
+        L"system idle process",
+        L"wininit.exe",
+        L"winlogon.exe",
+    };
+
+    return std::any_of(protectedNames.begin(), protectedNames.end(), [&](const wchar_t* protectedName) {
+        return name == protectedName;
+    });
+}
+
+static bool focusedWindowProcess(DWORD* pid, std::wstring* name, std::wstring* report) {
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd) {
+        if (report) *report = L"No focused window was found.";
+        return false;
+    }
+
+    DWORD focusedPid = 0;
+    GetWindowThreadProcessId(hwnd, &focusedPid);
+    if (focusedPid == 0) {
+        if (report) *report = L"Focused window does not expose a process id.";
+        return false;
+    }
+
+    std::wstring exeName = focusedProcessName(focusedPid);
+    if (exeName.empty()) {
+        if (report) *report = L"Could not read the focused app process name.";
+        return false;
+    }
+
+    if (pid) *pid = focusedPid;
+    if (name) *name = exeName;
+    return true;
+}
+
+static bool closeFocusedApp(bool strong, std::wstring* report) {
+    DWORD pid = 0;
+    std::wstring name;
+    if (!focusedWindowProcess(&pid, &name, report)) return false;
+
+    if (isProtectedProcess(name)) {
+        if (report) *report = L"Blocked close request for protected app: " + name;
+        return false;
+    }
+
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd) {
+        if (report) *report = L"No focused window was found.";
+        return false;
+    }
+
+    if (strong) {
+        DWORD_PTR result = 0;
+        LRESULT sent = SendMessageTimeoutW(hwnd, WM_CLOSE, 0, 0, SMTO_ABORTIFHUNG, 1500, &result);
+        if (!sent) {
+            if (report) *report = L"Focused app did not respond to the close request: " + name;
+            return false;
+        }
+        if (report) *report = L"Sent stronger close request to " + name + L" (pid " + std::to_wstring(pid) + L")";
+        return true;
+    }
+
+    if (!PostMessageW(hwnd, WM_CLOSE, 0, 0)) {
+        std::wstringstream out;
+        out << L"Could not send close request to " << name << L" (Windows error " << GetLastError() << L")";
+        if (report) *report = out.str();
+        return false;
+    }
+
+    if (report) *report = L"Sent polite close request to " + name + L" (pid " + std::to_wstring(pid) + L")";
+    return true;
+}
+
+static bool killFocusedApp(std::wstring* report) {
+    DWORD pid = 0;
+    std::wstring name;
+    if (!focusedWindowProcess(&pid, &name, report)) return false;
+
+    if (pid == GetCurrentProcessId() || isProtectedProcess(name)) {
+        if (report) *report = L"Blocked force-end for protected app: " + name;
+        return false;
+    }
+
+    HANDLE process = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        std::wstringstream out;
+        out << L"Could not open " << name << L" for force-end (Windows error " << GetLastError() << L")";
+        if (report) *report = out.str();
+        return false;
+    }
+
+    BOOL terminated = TerminateProcess(process, 1);
+    DWORD error = terminated ? 0 : GetLastError();
+    CloseHandle(process);
+
+    if (!terminated) {
+        std::wstringstream out;
+        out << L"Could not force-end " << name << L" (Windows error " << error << L")";
+        if (report) *report = out.str();
+        return false;
+    }
+
+    if (report) *report = L"Force-ended " + name + L" (pid " + std::to_wstring(pid) + L")";
+    return true;
+}
 
 ActionBuildResult makeAction(const ActionSpec& spec) {
     if (spec.type == L"builtin") {
@@ -17,6 +212,17 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
                             wprintf(L"  -> audio output: %s\n", name.c_str());
                         } else {
                             wprintf(L"  ! audio switch failed\n");
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"cycle_microphone_input") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring name;
+                        if (cycleMicrophoneDevice(&name)) {
+                            wprintf(L"  -> microphone input: %s\n", name.c_str());
+                        } else {
+                            wprintf(L"  ! microphone switch failed\n");
                         }
                     }),
                     L""};
@@ -52,6 +258,26 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
                     }),
                     L""};
         }
+        if (spec.name == L"cycle_focused_app_microphone_input") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        bool ok = false;
+                        if (_wcsicmp(focusedAppExeName().c_str(), L"Discord.exe") == 0) {
+                            ok = sendDiscordBridgeCommand("cycle_input_device", &report);
+                        } else {
+                            std::wstring name;
+                            ok = cycleMicrophoneDevice(&name);
+                            report = ok ? L"microphone input: " + name : L"microphone switch failed";
+                        }
+
+                        if (ok) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
         if (spec.name == L"cycle_discord_output_device") {
             return {std::make_unique<BuiltinAction>([] {
                         std::wstring report;
@@ -63,12 +289,50 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
                     }),
                     L""};
         }
+        if (spec.name == L"cycle_discord_microphone_input") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        bool ok = sendDiscordBridgeCommand("cycle_input_device", &report);
+                        wprintf(L"  -> %s\n", report.c_str());
+                        if (!ok) {
+                            MessageBoxW(nullptr, report.c_str(), L"Discord Microphone Bridge", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"close_focused_app") {
+            return {std::make_unique<BuiltinAction>([strong = spec.strongClose] {
+                        std::wstring report;
+                        if (closeFocusedApp(strong, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"kill_focused_app") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (killFocusedApp(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
         return {nullptr, L"unknown builtin action"};
     }
 
     if (spec.type == L"open_app") {
         if (spec.path.empty()) return {nullptr, L"open_app action is missing path"};
         return {std::make_unique<ExecutableScript>(spec.path, spec.args, spec.showWindow), L""};
+    }
+
+    if (spec.type == L"run_script") {
+        if (spec.path.empty()) return {nullptr, L"run_script action is missing path"};
+        return {makeScriptAction(spec), L""};
     }
 
     if (spec.type == L"run_command") {

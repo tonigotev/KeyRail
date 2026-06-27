@@ -64,13 +64,13 @@ static std::wstring friendlyName(IMMDevice* dev, const std::wstring& fallback) {
     return name;
 }
 
-static std::wstring defaultDeviceId(IMMDeviceEnumerator* enumr, ERole role) {
+static std::wstring defaultDeviceId(IMMDeviceEnumerator* enumr, EDataFlow flow, ERole role) {
     ComPtr<IMMDevice> def;
-    if (FAILED(enumr->GetDefaultAudioEndpoint(eRender, role, &def))) return {};
+    if (FAILED(enumr->GetDefaultAudioEndpoint(flow, role, &def))) return {};
     return deviceId(def.Get());
 }
 
-bool cycleAudioDevice(std::wstring* outName) {
+static bool cycleDefaultEndpoint(EDataFlow flow, std::wstring* outName) {
     ComInit com;
 
     ComPtr<IMMDeviceEnumerator> enumr;
@@ -79,7 +79,7 @@ bool cycleAudioDevice(std::wstring* outName) {
         return false;
 
     ComPtr<IMMDeviceCollection> coll;
-    if (FAILED(enumr->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &coll)))
+    if (FAILED(enumr->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, &coll)))
         return false;
 
     UINT count = 0;
@@ -100,8 +100,8 @@ bool cycleAudioDevice(std::wstring* outName) {
     // Windows Settings' output picker follows the console render role. The
     // multimedia role can disagree, which makes the UI flicker without the
     // visible selected output changing.
-    std::wstring current = defaultDeviceId(enumr.Get(), eConsole);
-    if (current.empty()) current = defaultDeviceId(enumr.Get(), eMultimedia);
+    std::wstring current = defaultDeviceId(enumr.Get(), flow, eConsole);
+    if (current.empty()) current = defaultDeviceId(enumr.Get(), flow, eMultimedia);
 
     size_t idx = 0; bool found = false;
     for (size_t i = 0; i < ids.size(); ++i)
@@ -121,11 +121,19 @@ bool cycleAudioDevice(std::wstring* outName) {
         policy->SetDefaultEndpoint(ids[next].c_str(), eMultimedia);
         policy->SetDefaultEndpoint(ids[next].c_str(), eCommunications);
 
-        if (defaultDeviceId(enumr.Get(), eConsole) == ids[next]) {
+        if (defaultDeviceId(enumr.Get(), flow, eConsole) == ids[next]) {
             if (outName) *outName = names[next];
             return true;
         }
     }
 
     return false;
+}
+
+bool cycleAudioDevice(std::wstring* outName) {
+    return cycleDefaultEndpoint(eRender, outName);
+}
+
+bool cycleMicrophoneDevice(std::wstring* outName) {
+    return cycleDefaultEndpoint(eCapture, outName);
 }

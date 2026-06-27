@@ -5,3 +5,8 @@
 // Returns true on success; if outName is non-null, it receives the new
 // device's friendly name.
 bool cycleAudioDevice(std::wstring* outName = nullptr);
+
+// Switch the default capture device to the next active microphone/input.
+// Returns true on success; if outName is non-null, it receives the new
+// device's friendly name.
+bool cycleMicrophoneDevice(std::wstring* outName = nullptr);

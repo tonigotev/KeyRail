@@ -102,8 +102,12 @@ static ActionSpec parseAction(const json& obj) {
     action.name = readString(obj, "name");
     action.path = readString(obj, "path");
     action.command = readString(obj, "command");
+    action.workingDir = readString(obj, "working_dir");
+    action.interpreter = readString(obj, "interpreter");
     auto show = obj.find("show_window");
     if (show != obj.end() && show->is_boolean()) action.showWindow = show->get<bool>();
+    auto strongClose = obj.find("strong_close");
+    if (strongClose != obj.end() && strongClose->is_boolean()) action.strongClose = strongClose->get<bool>();
 
     auto args = obj.find("args");
     if (args != obj.end() && args->is_array()) {

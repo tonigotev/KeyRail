@@ -311,6 +311,17 @@ fn select_app_path() -> Option<String> {
         .map(|path| path.to_string_lossy().to_string())
 }
 
+#[tauri::command]
+fn select_script_path() -> Option<String> {
+    rfd::FileDialog::new()
+        .add_filter(
+            "Scripts and executables",
+            &["exe", "com", "py", "pyw", "ps1", "bat", "cmd", "js", "mjs", "cjs", "vbs", "wsf", "ahk"],
+        )
+        .pick_file()
+        .map(|path| path.to_string_lossy().to_string())
+}
+
 fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
@@ -318,7 +329,8 @@ fn main() {
             save_config,
             ensure_daemon,
             send_daemon_command,
-            select_app_path
+            select_app_path,
+            select_script_path
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hotkey To Command UI");
