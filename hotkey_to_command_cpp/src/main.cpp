@@ -9,6 +9,7 @@
 
 #include "config.h"
 #include "control_pipe.h"
+#include "discord_bridge.h"
 #include "hotkey_registry.h"
 
 static constexpr UINT WM_HOTKEYD_RELOAD = WM_APP + 1;
@@ -62,6 +63,7 @@ int main() {
 
     RegisterHotKey(nullptr, QUIT_HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q');
     wprintf(L"hotkeyd starting\n");
+    startDiscordBridge();
 
     loadAndApply(state, false);
 
@@ -97,6 +99,7 @@ int main() {
     }
 
     pipe.stop();
+    stopDiscordBridge();
     state.registry.clear();
     UnregisterHotKey(nullptr, QUIT_HOTKEY_ID);
     wprintf(L"bye\n");

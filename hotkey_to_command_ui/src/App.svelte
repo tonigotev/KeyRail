@@ -3,7 +3,7 @@
   import { invoke } from "@tauri-apps/api/core";
 
   type ActionSpec =
-    | { type: "builtin"; name: "cycle_audio_output" }
+    | { type: "builtin"; name: "cycle_audio_output" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_discord_output_device" }
     | { type: "open_app"; path: string; args: string[]; show_window: boolean }
     | { type: "run_command"; command: string; show_window: boolean };
 
@@ -144,10 +144,18 @@
   }
 
   function setActionType(binding: BindingSpec, type: string) {
-    if (type === "builtin") binding.action = { type: "builtin", name: "cycle_audio_output" };
+    if (type === "cycle_audio_output") binding.action = { type: "builtin", name: "cycle_audio_output" };
+    if (type === "inspect_focused_app_audio") binding.action = { type: "builtin", name: "inspect_focused_app_audio" };
+    if (type === "cycle_focused_app_audio_output") binding.action = { type: "builtin", name: "cycle_focused_app_audio_output" };
+    if (type === "cycle_discord_output_device") binding.action = { type: "builtin", name: "cycle_discord_output_device" };
     if (type === "open_app") binding.action = { type: "open_app", path: "", args: [], show_window: true };
     if (type === "run_command") binding.action = { type: "run_command", command: "", show_window: false };
     touch();
+  }
+
+  function actionSelectValue(action: ActionSpec) {
+    if (action.type === "builtin") return action.name;
+    return action.type;
   }
 
   async function chooseApp(binding: BindingSpec) {
@@ -244,10 +252,13 @@
 
             <label>
               <span>Action</span>
-              <select value={binding.action.type} on:change={(event) => setActionType(binding, event.currentTarget.value)}>
+              <select value={actionSelectValue(binding.action)} on:change={(event) => setActionType(binding, event.currentTarget.value)}>
                 <option value="open_app">Open app</option>
-                <option value="builtin">Cycle audio output</option>
+                <option value="cycle_audio_output">Cycle audio output</option>
+                <option value="cycle_focused_app_audio_output">Cycle focused app output</option>
                 {#if advancedVisible}
+                  <option value="inspect_focused_app_audio">Inspect focused app audio</option>
+                  <option value="cycle_discord_output_device">Cycle Discord output</option>
                   <option value="run_command">Run command</option>
                 {/if}
               </select>
@@ -279,7 +290,7 @@
               <input bind:value={binding.action.command} on:input={touch} placeholder="Advanced shell command" />
             </label>
           {:else}
-            <div class="builtin">Built-in action: cycle the default audio output device.</div>
+            <div class="builtin">Built-in action selected.</div>
           {/if}
         </article>
       {/each}

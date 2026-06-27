@@ -7,16 +7,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(hotkeyd
     src/main.cpp
     src/action_factory.cpp
+    src/app_audio.cpp
     src/audio.cpp
     src/config.cpp
     src/control_pipe.cpp
+    src/discord_bridge.cpp
     src/hotkey.cpp
     src/hotkey_registry.cpp
 )
 
 target_compile_definitions(hotkeyd PRIVATE UNICODE _UNICODE)
 target_include_directories(hotkeyd PRIVATE external)
-target_link_libraries(hotkeyd PRIVATE ole32 user32)
+target_link_libraries(hotkeyd PRIVATE bcrypt ole32 runtimeobject user32 ws2_32)
 
 if (MSVC)
     target_compile_options(hotkeyd PRIVATE /W4 /utf-8)
