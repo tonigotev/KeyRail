@@ -107,6 +107,15 @@ static bool isProtectedProcess(const std::wstring& name) {
     });
 }
 
+static bool isDiscordProcess(const std::wstring& exeName) {
+    const std::wstring name = lowerCopy(exeName);
+    return name == L"discord.exe"
+        || name == L"discordptb.exe"
+        || name == L"discordcanary.exe"
+        || name == L"discorddevelopment.exe"
+        || name == L"discordsystemhelper.exe";
+}
+
 static bool focusedWindowProcess(DWORD* pid, std::wstring* name, std::wstring* report) {
     HWND hwnd = GetForegroundWindow();
     if (!hwnd) {
@@ -244,7 +253,7 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
             return {std::make_unique<BuiltinAction>([] {
                         std::wstring report;
                         bool ok = false;
-                        if (_wcsicmp(focusedAppExeName().c_str(), L"Discord.exe") == 0) {
+                        if (isDiscordProcess(focusedAppExeName())) {
                             ok = sendDiscordBridgeCommand("cycle_output_device", &report);
                         } else {
                             ok = cycleFocusedAppAudioOutput(&report);
@@ -262,7 +271,7 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
             return {std::make_unique<BuiltinAction>([] {
                         std::wstring report;
                         bool ok = false;
-                        if (_wcsicmp(focusedAppExeName().c_str(), L"Discord.exe") == 0) {
+                        if (isDiscordProcess(focusedAppExeName())) {
                             ok = sendDiscordBridgeCommand("cycle_input_device", &report);
                         } else {
                             std::wstring name;
