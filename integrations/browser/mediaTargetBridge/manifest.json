@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Hotkey To Command Media Bridge",
+  "version": "0.1.0",
+  "description": "Exposes browser tab media targets to the Hotkey To Command daemon.",
+  "permissions": ["tabs", "webNavigation", "scripting", "alarms", "storage"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_title": "Hotkey Media Bridge",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["ms-capture.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

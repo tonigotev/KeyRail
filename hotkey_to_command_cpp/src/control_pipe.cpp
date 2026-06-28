@@ -1,5 +1,8 @@
 #include "control_pipe.h"
 
+#include "browser_bridge.h"
+#include "media_sessions.h"
+
 #include <nlohmann/json.hpp>
 
 #include <utility>
@@ -85,6 +88,16 @@ void ControlPipe::run() {
                         json out;
                         out["ok"] = true;
                         out["status"] = wideToUtf8(statusProvider_ ? statusProvider_() : L"");
+                        response = out.dump();
+                    } else if (command == "media_status") {
+                        json out;
+                        out["ok"] = true;
+                        out["status"] = wideToUtf8(describeMediaTargets());
+                        response = out.dump();
+                    } else if (command == "browser_status") {
+                        json out;
+                        out["ok"] = true;
+                        out["status"] = wideToUtf8(describeBrowserBridgeStatus());
                         response = out.dump();
                     } else if (command == "quit") {
                         PostThreadMessageW(targetThreadId_, quitMessage_, 0, 0);

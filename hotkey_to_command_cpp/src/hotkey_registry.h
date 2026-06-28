@@ -7,6 +7,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <windows.h>
 
 class HotkeyRegistry {
 public:
@@ -20,4 +21,5 @@ private:
     std::vector<int> registeredIds_;
     std::vector<std::unique_ptr<Runnable>> actions_;
     std::unordered_map<int, Runnable*> dispatch_;
+    std::unordered_map<int, UINT> hotkeyVk_;
 };

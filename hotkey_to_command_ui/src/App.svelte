@@ -4,7 +4,7 @@
   import { getCurrentWindow } from "@tauri-apps/api/window";
 
   type ActionSpec =
-    | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean }
+    | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "media_picker_open" | "media_picker_next" | "media_picker_previous" | "media_picker_confirm" | "media_picker_cancel" | "media_selected_play_pause" | "media_selected_next" | "media_selected_previous" | "media_next_contextual" | "media_previous_contextual" | "media_play_pause_contextual" | "inspect_media_sessions" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean }
     | { type: "open_app"; path: string; args: string[]; show_window: boolean }
     | { type: "run_script"; path: string; args: string[]; working_dir: string; interpreter: string; show_window: boolean }
     | { type: "run_command"; command: string; show_window: boolean };
@@ -196,6 +196,18 @@
     if (type === "cycle_focused_app_microphone_input") binding.action = { type: "builtin", name: "cycle_focused_app_microphone_input" };
     if (type === "cycle_discord_output_device") binding.action = { type: "builtin", name: "cycle_discord_output_device" };
     if (type === "cycle_discord_microphone_input") binding.action = { type: "builtin", name: "cycle_discord_microphone_input" };
+    if (type === "media_picker_open") binding.action = { type: "builtin", name: "media_picker_open" };
+    if (type === "media_picker_next") binding.action = { type: "builtin", name: "media_picker_next" };
+    if (type === "media_picker_previous") binding.action = { type: "builtin", name: "media_picker_previous" };
+    if (type === "media_picker_confirm") binding.action = { type: "builtin", name: "media_picker_confirm" };
+    if (type === "media_picker_cancel") binding.action = { type: "builtin", name: "media_picker_cancel" };
+    if (type === "media_selected_play_pause") binding.action = { type: "builtin", name: "media_selected_play_pause" };
+    if (type === "media_selected_next") binding.action = { type: "builtin", name: "media_selected_next" };
+    if (type === "media_selected_previous") binding.action = { type: "builtin", name: "media_selected_previous" };
+    if (type === "media_next_contextual") binding.action = { type: "builtin", name: "media_next_contextual" };
+    if (type === "media_previous_contextual") binding.action = { type: "builtin", name: "media_previous_contextual" };
+    if (type === "media_play_pause_contextual") binding.action = { type: "builtin", name: "media_play_pause_contextual" };
+    if (type === "inspect_media_sessions") binding.action = { type: "builtin", name: "inspect_media_sessions" };
     if (type === "close_focused_app") binding.action = { type: "builtin", name: "close_focused_app", strong_close: false };
     if (type === "kill_focused_app") binding.action = { type: "builtin", name: "kill_focused_app" };
     if (type === "open_app") binding.action = { type: "open_app", path: "", args: [], show_window: true };
@@ -299,9 +311,22 @@
     if (action.name === "cycle_focused_app_microphone_input") return "Focused app microphone";
     if (action.name === "inspect_focused_app_audio") return "Inspect focused app audio";
     if (action.name === "cycle_discord_output_device") return "Cycle Discord output";
+    if (action.name === "cycle_discord_microphone_input") return "Cycle Discord microphone input";
+    if (action.name === "media_picker_open") return "Open media picker";
+    if (action.name === "media_picker_next") return "Picker next target";
+    if (action.name === "media_picker_previous") return "Picker previous target";
+    if (action.name === "media_picker_confirm") return "Picker confirm target";
+    if (action.name === "media_picker_cancel") return "Picker cancel";
+    if (action.name === "media_selected_play_pause") return "Selected media play/pause";
+    if (action.name === "media_selected_next") return "Selected media next";
+    if (action.name === "media_selected_previous") return "Selected media previous";
+    if (action.name === "media_next_contextual") return "Media next / picker next";
+    if (action.name === "media_previous_contextual") return "Media previous / picker previous";
+    if (action.name === "media_play_pause_contextual") return "Media play/pause / picker confirm";
+    if (action.name === "inspect_media_sessions") return "Inspect media sessions";
     if (action.name === "close_focused_app") return "Close focused app";
     if (action.name === "kill_focused_app") return "Kill focused app";
-    return "Cycle Discord microphone input";
+    return action.name;
   }
 
   function actionMeta(binding: BindingSpec) {
@@ -328,6 +353,10 @@
     if (lower === "arrowleft") return "left";
     if (lower === "arrowright") return "right";
     if (lower === "escape") return "esc";
+    if (lower === "mediatracknext") return "media_next";
+    if (lower === "mediatrackprevious") return "media_previous";
+    if (lower === "mediaplaypause") return "media_play_pause";
+    if (lower === "mediastop") return "media_stop";
     if (lower === "pageup" || lower === "pagedown") return lower;
     if (lower.length === 1) return lower;
     return lower;
@@ -559,10 +588,22 @@
                   <option value="cycle_microphone_input">Cycle microphone input</option>
                   <option value="cycle_focused_app_audio_output">Focused app output</option>
                   <option value="cycle_focused_app_microphone_input">Focused app microphone</option>
+                  <option value="media_picker_open">Open media picker</option>
+                  <option value="media_next_contextual">Media next / picker next</option>
+                  <option value="media_previous_contextual">Media previous / picker previous</option>
+                  <option value="media_play_pause_contextual">Media play/pause / picker confirm</option>
                   <option value="close_focused_app">Close focused app</option>
                   <option value="kill_focused_app">Kill focused app</option>
                   {#if advancedVisible}
                     <option value="inspect_focused_app_audio">Inspect focused app audio</option>
+                    <option value="inspect_media_sessions">Inspect media sessions</option>
+                    <option value="media_picker_next">Picker next target</option>
+                    <option value="media_picker_previous">Picker previous target</option>
+                    <option value="media_picker_confirm">Picker confirm target</option>
+                    <option value="media_picker_cancel">Picker cancel</option>
+                    <option value="media_selected_play_pause">Selected media play/pause</option>
+                    <option value="media_selected_next">Selected media next</option>
+                    <option value="media_selected_previous">Selected media previous</option>
                     <option value="cycle_discord_output_device">Cycle Discord output</option>
                     <option value="cycle_discord_microphone_input">Cycle Discord microphone input</option>
                     <option value="run_command">Run command</option>

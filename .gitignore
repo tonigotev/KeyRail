@@ -32,3 +32,6 @@ hotkey_to_command_ui/src-tauri/gen/
 config.json
 *.tmp
 *.log
+
+# Local research/reference drops
+integrations/browser/claude/

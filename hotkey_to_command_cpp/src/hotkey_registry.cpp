@@ -2,9 +2,12 @@
 
 #include "action_factory.h"
 #include "hotkey.h"
+#include "synthetic_hotkey_suppression.h"
 
 #include <windows.h>
+#include <cstdio>
 #include <sstream>
+#include <exception>
 #include <thread>
 #include <unordered_set>
 
@@ -19,6 +22,7 @@ void HotkeyRegistry::clear() {
     registeredIds_.clear();
     dispatch_.clear();
     actions_.clear();
+    hotkeyVk_.clear();
 }
 
 std::wstring HotkeyRegistry::apply(const AppConfig& config) {
@@ -68,6 +72,7 @@ std::wstring HotkeyRegistry::apply(const AppConfig& config) {
         Runnable* action = built.action.get();
         actions_.push_back(std::move(built.action));
         dispatch_[id] = action;
+        hotkeyVk_[id] = combo.vk;
         registeredIds_.push_back(id);
         ++armed;
 
@@ -79,10 +84,24 @@ std::wstring HotkeyRegistry::apply(const AppConfig& config) {
 }
 
 bool HotkeyRegistry::dispatch(WPARAM hotkeyId) const {
-    auto it = dispatch_.find(static_cast<int>(hotkeyId));
+    const int id = static_cast<int>(hotkeyId);
+    auto vk = hotkeyVk_.find(id);
+    if (vk != hotkeyVk_.end() && consumeSuppressedSyntheticHotkey(vk->second)) {
+        return true;
+    }
+
+    auto it = dispatch_.find(id);
     if (it == dispatch_.end()) return false;
 
     Runnable* action = it->second;
-    std::thread([action] { action->run(); }).detach();
+    std::thread([action] {
+        try {
+            action->run();
+        } catch (const std::exception& ex) {
+            wprintf(L"hotkey action failed: %S\n", ex.what());
+        } catch (...) {
+            wprintf(L"hotkey action failed: unknown exception\n");
+        }
+    }).detach();
     return true;
 }

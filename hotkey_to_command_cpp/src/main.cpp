@@ -7,6 +7,7 @@
 #include <mutex>
 #include <string>
 
+#include "browser_bridge.h"
 #include "config.h"
 #include "control_pipe.h"
 #include "discord_bridge.h"
@@ -64,6 +65,7 @@ int main() {
     RegisterHotKey(nullptr, QUIT_HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q');
     wprintf(L"hotkeyd starting\n");
     startDiscordBridge();
+    startBrowserMediaBridge();
 
     loadAndApply(state, false);
 
@@ -99,6 +101,7 @@ int main() {
     }
 
     pipe.stop();
+    stopBrowserMediaBridge();
     stopDiscordBridge();
     state.registry.clear();
     UnregisterHotKey(nullptr, QUIT_HOTKEY_ID);

@@ -1,0 +1,51 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Hotkey Media Bridge</title>
+    <style>
+      body {
+        width: 320px;
+        margin: 0;
+        padding: 14px;
+        color: #f4f6fb;
+        background: #151821;
+        font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      h1 {
+        margin: 0 0 10px;
+        font-size: 15px;
+        font-weight: 650;
+      }
+      button {
+        width: 100%;
+        padding: 9px 10px;
+        margin: 0 0 10px;
+        color: #11151f;
+        background: #8cc8ff;
+        border: 0;
+        border-radius: 6px;
+        font-weight: 650;
+        cursor: pointer;
+      }
+      pre {
+        overflow: auto;
+        max-height: 280px;
+        margin: 0;
+        padding: 10px;
+        color: #d8deea;
+        background: #0d1017;
+        border: 1px solid #2a3040;
+        border-radius: 6px;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Hotkey Media Bridge</h1>
+    <button id="connect">Connect now</button>
+    <button id="scan">Scan tabs now</button>
+    <pre id="status">Loading...</pre>
+    <script src="popup.js"></script>
+  </body>
+</html>

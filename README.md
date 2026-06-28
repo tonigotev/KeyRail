@@ -6,6 +6,8 @@ This repo contains:
 
 - `hotkey_to_command_cpp/` - C++ hotkey daemon using `RegisterHotKey`, `GetMessage`, a JSON config file, and a local named pipe control channel.
 - `hotkey_to_command_ui/` - Tauri + Svelte settings UI for editing bindings and starting/stopping the daemon.
+- `integrations/browser/mediaTargetBridge/` - Brave/Chrome extension that exposes per-tab media targets to the daemon.
+- `integrations/vencord/outputDeviceBridge/` - Vencord bridge for Discord audio-device control.
 - `hotkey_to_command/` and `hotkey_test.py` - earlier Python prototypes/smoke tests.
 
 ## Features
@@ -16,6 +18,8 @@ This repo contains:
 - Open-app action for launching executables.
 - Advanced command action for shell commands.
 - UI controls for editing bindings, saving config, checking daemon status, and stopping the daemon.
+- Media picker actions for Windows media sessions and browser tab media targets.
+- Browser bridge on `ws://127.0.0.1:8790/browser-media`.
 
 ## Requirements
 
@@ -40,6 +44,12 @@ The daemon executable is generated at:
 hotkey_to_command_cpp/build/Release/hotkeyd.exe
 ```
 
+The media diagnostic executable is generated at:
+
+```text
+hotkey_to_command_cpp/build/Release/media_list.exe
+```
+
 ## Run The UI
 
 From `hotkey_to_command_ui/`:
@@ -54,6 +64,28 @@ The UI starts the daemon if needed and talks to it through:
 ```text
 \\.\pipe\hotkeyd-control
 ```
+
+## Browser Media Bridge
+
+For per-tab browser media control, load the extension in Brave or Chrome:
+
+1. Start the daemon or run `media_list.exe`.
+2. Open `brave://extensions`.
+3. Enable Developer Mode.
+4. Click **Load unpacked**.
+5. Select:
+
+```text
+integrations/browser/mediaTargetBridge
+```
+
+Then test:
+
+```powershell
+& "C:\Users\boris\Documents\hotkeys stuff\hotkey_to_command_cpp\build\Release\media_list.exe"
+```
+
+With the extension connected, browser targets appear as `kind: browser`.
 
 ## Config Example
 
@@ -79,6 +111,33 @@ The UI starts the daemon if needed and talks to it through:
         "path": "C:\\Windows\\System32\\notepad.exe",
         "args": [],
         "show_window": true
+      }
+    },
+    {
+      "id": "media-picker",
+      "enabled": true,
+      "hotkey": "ctrl+alt+m",
+      "action": {
+        "type": "builtin",
+        "name": "media_picker_open"
+      }
+    },
+    {
+      "id": "media-next",
+      "enabled": true,
+      "hotkey": "media_next",
+      "action": {
+        "type": "builtin",
+        "name": "media_next_contextual"
+      }
+    },
+    {
+      "id": "media-play-pause",
+      "enabled": true,
+      "hotkey": "media_play_pause",
+      "action": {
+        "type": "builtin",
+        "name": "media_play_pause_contextual"
       }
     }
   ]

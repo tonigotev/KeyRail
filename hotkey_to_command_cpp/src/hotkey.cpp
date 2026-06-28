@@ -13,7 +13,14 @@ HotkeyCombo parseHotkeyCombo(const std::wstring& text) {
         {L"backspace", VK_BACK}, {L"delete", VK_DELETE}, {L"insert", VK_INSERT},
         {L"home", VK_HOME}, {L"end", VK_END}, {L"pageup", VK_PRIOR},
         {L"pagedown", VK_NEXT}, {L"up", VK_UP}, {L"down", VK_DOWN},
-        {L"left", VK_LEFT}, {L"right", VK_RIGHT}};
+        {L"left", VK_LEFT}, {L"right", VK_RIGHT},
+        {L"media_next", VK_MEDIA_NEXT_TRACK}, {L"medianext", VK_MEDIA_NEXT_TRACK},
+        {L"nexttrack", VK_MEDIA_NEXT_TRACK}, {L"next_track", VK_MEDIA_NEXT_TRACK},
+        {L"media_previous", VK_MEDIA_PREV_TRACK}, {L"media_prev", VK_MEDIA_PREV_TRACK},
+        {L"previous_track", VK_MEDIA_PREV_TRACK}, {L"prev_track", VK_MEDIA_PREV_TRACK},
+        {L"media_play_pause", VK_MEDIA_PLAY_PAUSE}, {L"play_pause", VK_MEDIA_PLAY_PAUSE},
+        {L"playpause", VK_MEDIA_PLAY_PAUSE},
+        {L"media_stop", VK_MEDIA_STOP}};
 
     UINT mods = 0;
     std::wstring key;

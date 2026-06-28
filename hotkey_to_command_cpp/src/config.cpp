@@ -63,6 +63,51 @@ std::wstring defaultConfigText() {
         "args": [],
         "show_window": true
       }
+    },
+    {
+      "id": "media-picker",
+      "enabled": true,
+      "hotkey": "ctrl+alt+m",
+      "action": {
+        "type": "builtin",
+        "name": "media_picker_open"
+      }
+    },
+    {
+      "id": "media-next",
+      "enabled": true,
+      "hotkey": "media_next",
+      "action": {
+        "type": "builtin",
+        "name": "media_next_contextual"
+      }
+    },
+    {
+      "id": "media-previous",
+      "enabled": true,
+      "hotkey": "media_previous",
+      "action": {
+        "type": "builtin",
+        "name": "media_previous_contextual"
+      }
+    },
+    {
+      "id": "media-play-pause",
+      "enabled": true,
+      "hotkey": "media_play_pause",
+      "action": {
+        "type": "builtin",
+        "name": "media_play_pause_contextual"
+      }
+    },
+    {
+      "id": "media-picker-cancel",
+      "enabled": true,
+      "hotkey": "media_stop",
+      "action": {
+        "type": "builtin",
+        "name": "media_picker_cancel"
+      }
     }
   ]
 }

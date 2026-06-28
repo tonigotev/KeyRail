@@ -3,6 +3,7 @@
 #include "app_audio.h"
 #include "audio.h"
 #include "discord_bridge.h"
+#include "media_sessions.h"
 
 #include <windows.h>
 
@@ -306,6 +307,132 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
                         if (!ok) {
                             MessageBoxW(nullptr, report.c_str(), L"Discord Microphone Bridge", MB_OK | MB_ICONWARNING | MB_SETFOREGROUND);
                         }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_picker_open") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (openMediaPicker(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_picker_next") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (moveMediaPicker(1, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_picker_previous") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (moveMediaPicker(-1, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_picker_confirm") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (confirmMediaPicker(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_picker_cancel") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        cancelMediaPicker(&report);
+                        wprintf(L"  -> %s\n", report.c_str());
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_selected_play_pause") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (controlSelectedMedia(MediaCommand::TogglePlayPause, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_selected_next") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (controlSelectedMedia(MediaCommand::Next, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_selected_previous") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (controlSelectedMedia(MediaCommand::Previous, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_next_contextual") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (mediaNextContextual(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_previous_contextual") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (mediaPreviousContextual(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"media_play_pause_contextual") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (mediaPlayPauseContextual(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"inspect_media_sessions") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report = describeMediaTargets();
+                        wprintf(L"\n%s\n", report.c_str());
+                        MessageBoxW(nullptr, report.c_str(), L"Media Sessions", MB_OK | MB_SETFOREGROUND);
                     }),
                     L""};
         }
