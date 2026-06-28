@@ -39,6 +39,15 @@
     lines: string[];
   };
 
+  type ThemeName = "current" | "dark" | "cream" | "barbie";
+
+  const themes: { name: ThemeName; label: string; colors: string[] }[] = [
+    { name: "current", label: "Current", colors: ["#13222d", "#0f8f8e", "#f6f7f8"] },
+    { name: "dark", label: "Dark", colors: ["#090d14", "#4f8cff", "#151a22"] },
+    { name: "cream", label: "Cream", colors: ["#f7ead5", "#b7672f", "#fffaf0"] },
+    { name: "barbie", label: "Barbie", colors: ["#ff4fa3", "#8f2cff", "#fff0f8"] }
+  ];
+
   const defaultConfig: AppConfig = {
     version: 1,
     bindings: []
@@ -55,6 +64,7 @@
   let eventLog: string[] = [];
   let advancedPulse = false;
   let advancedPulseTimer: ReturnType<typeof setTimeout> | undefined;
+  let theme: ThemeName = "current";
 
   $: duplicateHotkeys = findDuplicateHotkeys(config.bindings);
   $: canSave = duplicateHotkeys.size === 0 && config.bindings.every((b) => b.id.trim() && b.hotkey.trim());
@@ -62,6 +72,8 @@
   $: armedBindings = config.bindings.filter((binding) => binding.enabled && binding.hotkey.trim()).length;
 
   onMount(() => {
+    const savedTheme = localStorage.getItem("hotkey-ui-theme") as ThemeName | null;
+    if (savedTheme && themes.some((item) => item.name === savedTheme)) theme = savedTheme;
     void (async () => {
       await loadConfig().catch(() => undefined);
       await ensureDaemonOnLaunch();
@@ -72,6 +84,13 @@
       if (statusTimer) clearInterval(statusTimer);
     };
   });
+
+  function setTheme(name: ThemeName) {
+    theme = name;
+    localStorage.setItem("hotkey-ui-theme", name);
+    pushToast(`${themes.find((item) => item.name === name)?.label ?? "Theme"} theme applied.`, "info");
+    logEvent(`theme set to ${name}`);
+  }
 
   function touch() {
     config = { ...config, bindings: [...config.bindings] };
@@ -454,7 +473,7 @@
   }
 </script>
 
-<main>
+<main data-theme={theme}>
   <header class="titlebar" role="presentation" data-tauri-drag-region on:pointerdown={startWindowDrag}>
     <div class="window-title" data-tauri-drag-region>
       <span></span>
@@ -514,6 +533,27 @@
           <input type="checkbox" checked={advancedVisible} on:change={toggleAdvanced} />
           Advanced mode
         </label>
+      </section>
+
+      <section class="theme-panel">
+        <h2>Theme</h2>
+        <div class="theme-grid">
+          {#each themes as item}
+            <button
+              class:active={theme === item.name}
+              class="theme-choice"
+              aria-pressed={theme === item.name}
+              on:click={() => setTheme(item.name)}
+            >
+              <span class="swatches">
+                {#each item.colors as color}
+                  <i style={`background: ${color}`}></i>
+                {/each}
+              </span>
+              <span>{item.label}</span>
+            </button>
+          {/each}
+        </div>
       </section>
     </aside>
 
