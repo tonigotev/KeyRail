@@ -31,7 +31,10 @@ static void setStatus(DaemonState& state, const std::wstring& status) {
 
 static std::wstring getStatus(DaemonState& state) {
     std::lock_guard<std::mutex> lock(state.statusMutex);
-    return state.status;
+    std::wstring status = state.status;
+    std::wstring event = state.registry.lastEvent();
+    if (!event.empty()) status += event + L"\n";
+    return status;
 }
 
 static void loadAndApply(DaemonState& state, bool keepPreviousOnFailure) {
@@ -97,6 +100,12 @@ int main() {
         if (msg.message == WM_HOTKEY) {
             if (static_cast<int>(msg.wParam) == QUIT_HOTKEY_ID) break;
             state.registry.dispatch(msg.wParam);
+            continue;
+        }
+
+        if (msg.message == WM_TIMER) {
+            state.registry.handleTimer(msg.wParam);
+            continue;
         }
     }
 

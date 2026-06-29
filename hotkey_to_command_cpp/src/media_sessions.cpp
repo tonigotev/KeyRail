@@ -27,6 +27,8 @@ constexpr UINT WM_MEDIA_OVERLAY_HIDE = WM_APP + 41;
 constexpr UINT_PTR kOverlayTimer = 1;
 constexpr int kPickerWidth = 612;
 constexpr int kToastWidth = 460;
+constexpr int kOverlayMargin = 36;
+constexpr int kOverlayTopMargin = 72;
 
 std::mutex g_pickerMutex;
 std::vector<MediaTarget> g_pickerTargets;
@@ -136,6 +138,18 @@ bool isBrowserWindowsSession(const MediaTarget& target) {
         || app.find(L"firefox") != std::wstring::npos
         || app.find(L"opera") != std::wstring::npos
         || app.find(L"vivaldi") != std::wstring::npos;
+}
+
+void replaceBrowserAppSessionsWhenTabsExist(
+    std::vector<MediaTarget>& targets,
+    const std::vector<MediaTarget>& browserTargets,
+    size_t* hiddenBrowserAppSessions) {
+    if (hiddenBrowserAppSessions) *hiddenBrowserAppSessions = 0;
+    if (browserTargets.empty()) return;
+
+    const size_t before = targets.size();
+    targets.erase(std::remove_if(targets.begin(), targets.end(), isBrowserWindowsSession), targets.end());
+    if (hiddenBrowserAppSessions) *hiddenBrowserAppSessions = before - targets.size();
 }
 
 std::wstring hostFromUrl(const std::wstring& url) {
@@ -505,6 +519,40 @@ int overlayWidthForState(const OverlayState& state) {
     return state.mode == OverlayMode::Message ? kToastWidth : kPickerWidth;
 }
 
+RECT overlayWorkArea() {
+    HWND foreground = GetForegroundWindow();
+    HMONITOR monitor = foreground ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) : nullptr;
+    if (!monitor) {
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    }
+
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (monitor && GetMonitorInfoW(monitor, &info)) {
+        return info.rcWork;
+    }
+
+    RECT fallback{
+        GetSystemMetrics(SM_XVIRTUALSCREEN),
+        GetSystemMetrics(SM_YVIRTUALSCREEN),
+        GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+        GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN),
+    };
+    return fallback;
+}
+
+POINT overlayPositionForSize(int width, int height) {
+    RECT work = overlayWorkArea();
+    int x = work.right - width - kOverlayMargin;
+    int y = work.top + kOverlayTopMargin;
+
+    if (x < work.left + 8) x = work.left + 8;
+    if (y + height > work.bottom - 8) y = (std::max)(work.top + 8, work.bottom - height - 8);
+    return {x, y};
+}
+
 LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_MEDIA_OVERLAY_UPDATE:
@@ -516,10 +564,10 @@ LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         }
         const int width = overlayWidthForState(state);
         const int height = overlayHeightForState(state);
-        const int x = GetSystemMetrics(SM_CXSCREEN) - width - 36;
+        const POINT position = overlayPositionForSize(width, height);
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18);
         SetWindowRgn(hwnd, region, TRUE);
-        SetWindowPos(hwnd, HWND_TOPMOST, x, 72, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        SetWindowPos(hwnd, HWND_TOPMOST, position.x, position.y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
         ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         InvalidateRect(hwnd, nullptr, TRUE);
         SetTimer(hwnd, kOverlayTimer, static_cast<UINT>(wParam == 0 ? 5000 : wParam), nullptr);
@@ -570,15 +618,14 @@ void overlayThreadMain() {
     RegisterClassW(&wc);
 
     const int height = 68;
-    const int x = GetSystemMetrics(SM_CXSCREEN) - kToastWidth - 36;
-    const int y = 72;
+    const POINT position = overlayPositionForSize(kToastWidth, height);
 
     g_overlayWindow = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         wc.lpszClassName,
         L"Hotkey To Command Media Picker",
         WS_POPUP,
-        x, y, kToastWidth, height,
+        position.x, position.y, kToastWidth, height,
         nullptr, nullptr, wc.hInstance, nullptr);
 
     if (g_overlayWindow) {
@@ -813,9 +860,35 @@ std::vector<MediaTarget> listMediaTargets(std::wstring* report) {
     std::vector<MediaTarget> browserTargets = cachedBrowserMediaTargets(&browserReport);
     size_t hiddenBrowserAppSessions = 0;
 
-    const size_t before = targets.size();
-    targets.erase(std::remove_if(targets.begin(), targets.end(), isBrowserWindowsSession), targets.end());
-    hiddenBrowserAppSessions = before - targets.size();
+    replaceBrowserAppSessionsWhenTabsExist(targets, browserTargets, &hiddenBrowserAppSessions);
+
+    targets.insert(targets.end(), browserTargets.begin(), browserTargets.end());
+    std::stable_sort(targets.begin(), targets.end(), [](const MediaTarget& left, const MediaTarget& right) {
+        if (left.playing != right.playing) return left.playing;
+        if (left.kind != right.kind) return left.kind < right.kind;
+        return displayName(left) < displayName(right);
+    });
+
+    if (report) {
+        *report = L"Media targets: " + std::to_wstring(targets.size()) + L"\n"
+            + windowsReport + L"\n" + browserReport;
+        if (hiddenBrowserAppSessions > 0) {
+            *report += L"\nhid " + std::to_wstring(hiddenBrowserAppSessions)
+                + L" duplicate browser app media session"
+                + (hiddenBrowserAppSessions == 1 ? L"" : L"s");
+        }
+    }
+    return targets;
+}
+
+std::vector<MediaTarget> listMediaTargetsLive(std::wstring* report) {
+    std::wstring windowsReport;
+    std::wstring browserReport;
+    std::vector<MediaTarget> targets = queryWindowsMediaTargets(&windowsReport);
+    std::vector<MediaTarget> browserTargets = listBrowserMediaTargets(&browserReport);
+    size_t hiddenBrowserAppSessions = 0;
+
+    replaceBrowserAppSessionsWhenTabsExist(targets, browserTargets, &hiddenBrowserAppSessions);
 
     targets.insert(targets.end(), browserTargets.begin(), browserTargets.end());
     std::stable_sort(targets.begin(), targets.end(), [](const MediaTarget& left, const MediaTarget& right) {
@@ -838,7 +911,7 @@ std::vector<MediaTarget> listMediaTargets(std::wstring* report) {
 
 bool openMediaPicker(std::wstring* report) {
     std::wstring queryReport;
-    std::vector<MediaTarget> targets = listMediaTargets(&queryReport);
+    std::vector<MediaTarget> targets = listMediaTargetsLive(&queryReport);
 
     std::lock_guard<std::mutex> lock(g_pickerMutex);
     g_pickerTargets = std::move(targets);

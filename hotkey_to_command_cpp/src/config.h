@@ -22,8 +22,15 @@ struct BindingSpec {
     ActionSpec action;
 };
 
+struct AppSettings {
+    std::wstring hotkeyMode = L"global";
+    std::wstring commandHotkey = L"ctrl+alt+space";
+    int commandTimeoutMs = 4000;
+};
+
 struct AppConfig {
     int version = 1;
+    AppSettings settings;
     std::vector<BindingSpec> bindings;
 };
 

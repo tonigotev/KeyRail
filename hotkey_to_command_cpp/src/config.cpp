@@ -2,6 +2,7 @@
 
 #include <windows.h>
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -43,6 +44,17 @@ std::wstring configPath() {
 std::wstring defaultConfigText() {
     return LR"({
   "version": 1,
+  "settings": {
+    "hotkey_mode": "global",
+    "command_hotkey": "ctrl+alt+space",
+    "command_timeout_ms": 4000
+  },
+  "onboarding": {
+    "completed": false,
+    "version": 1,
+    "seen_media_picker_extension": false,
+    "seen_discord_bridge": false
+  },
   "bindings": [
     {
       "id": "cycle-audio",
@@ -174,6 +186,24 @@ static BindingSpec parseBinding(const json& obj) {
     return binding;
 }
 
+static AppSettings parseSettings(const json& obj) {
+    AppSettings settings;
+    if (!obj.is_object()) return settings;
+
+    std::wstring mode = readString(obj, "hotkey_mode");
+    if (mode == L"global" || mode == L"command") settings.hotkeyMode = mode;
+
+    std::wstring commandHotkey = readString(obj, "command_hotkey");
+    if (!commandHotkey.empty()) settings.commandHotkey = commandHotkey;
+
+    auto timeout = obj.find("command_timeout_ms");
+    if (timeout != obj.end() && timeout->is_number_integer()) {
+        settings.commandTimeoutMs = (std::max)(1000, (std::min)(timeout->get<int>(), 15000));
+    }
+
+    return settings;
+}
+
 ConfigLoadResult loadConfig() {
     ConfigLoadResult result;
     result.path = configPath();
@@ -200,6 +230,9 @@ ConfigLoadResult loadConfig() {
         AppConfig config;
         auto version = root.find("version");
         if (version != root.end() && version->is_number_integer()) config.version = version->get<int>();
+
+        auto settings = root.find("settings");
+        if (settings != root.end()) config.settings = parseSettings(*settings);
 
         auto bindings = root.find("bindings");
         if (bindings == root.end() || !bindings->is_array()) {

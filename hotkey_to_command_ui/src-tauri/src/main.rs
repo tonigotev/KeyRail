@@ -4,7 +4,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -17,20 +19,50 @@ use std::os::windows::ffi::OsStrExt;
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
+    CloseHandle, ERROR_FILE_NOT_FOUND, GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, MoveFileExW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL,
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, OPEN_EXISTING,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Registry::{
+    RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
+    HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
+};
 
 const PIPE_NAME: &str = r"\\.\pipe\hotkeyd-control";
+const STARTUP_VALUE_NAME: &str = "HotkeyToCommandDaemon";
+const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 #[derive(Serialize)]
 struct ConfigEnvelope {
     path: String,
     config: Value,
+    active_preset: Option<String>,
+}
+
+#[derive(Serialize)]
+struct PresetInfo {
+    name: String,
+    path: String,
+    active: bool,
+}
+
+#[derive(Serialize)]
+struct BrowserBridgeStatus {
+    connected: bool,
+    clients: u32,
+    targets: u32,
+    detail: String,
+}
+
+#[derive(Serialize)]
+struct StartupStatus {
+    enabled: bool,
+    path: Option<String>,
+    detail: String,
 }
 
 fn app_dir() -> Result<PathBuf, String> {
@@ -42,9 +74,28 @@ fn config_path() -> Result<PathBuf, String> {
     Ok(app_dir()?.join("config.json"))
 }
 
+fn presets_dir() -> Result<PathBuf, String> {
+    Ok(app_dir()?.join("presets"))
+}
+
+fn active_preset_path() -> Result<PathBuf, String> {
+    Ok(app_dir()?.join("active_preset.txt"))
+}
+
 fn default_config() -> Value {
     json!({
         "version": 1,
+        "settings": {
+            "hotkey_mode": "global",
+            "command_hotkey": "ctrl+alt+space",
+            "command_timeout_ms": 4000
+        },
+        "onboarding": {
+            "completed": false,
+            "version": 1,
+            "seen_media_picker_extension": false,
+            "seen_discord_bridge": false
+        },
         "bindings": [
             {
                 "id": "cycle-audio",
@@ -83,6 +134,72 @@ fn ensure_config_file() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+fn read_active_preset() -> Result<Option<String>, String> {
+    let path = active_preset_path()?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let name = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn write_active_preset(name: &str) -> Result<(), String> {
+    let path = active_preset_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    fs::write(path, name).map_err(|error| error.to_string())
+}
+
+fn clear_active_preset() -> Result<(), String> {
+    let path = active_preset_path()?;
+    if path.exists() {
+        fs::remove_file(path).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn preset_json_path(name: &str) -> Result<PathBuf, String> {
+    if !is_valid_preset_name(name) {
+        return Err("invalid preset name".to_string());
+    }
+    Ok(presets_dir()?.join(name).join(format!("{name}.json")))
+}
+
+fn is_valid_preset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+}
+
+fn next_preset_name() -> Result<String, String> {
+    let dir = presets_dir()?;
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    for index in 1.. {
+        let name = format!("preset-{index}");
+        if !dir.join(&name).exists() {
+            return Ok(name);
+        }
+    }
+    Err("could not allocate preset name".to_string())
+}
+
+fn save_json_file(path: &PathBuf, config: &Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let temp = path.with_extension("json.tmp");
+    let text = serde_json::to_string_pretty(config).map_err(|error| error.to_string())?;
+    fs::write(&temp, text).map_err(|error| error.to_string())?;
+    replace_file(&temp, path)
+}
+
 #[tauri::command]
 fn load_config() -> Result<ConfigEnvelope, String> {
     let path = ensure_config_file()?;
@@ -91,16 +208,112 @@ fn load_config() -> Result<ConfigEnvelope, String> {
     Ok(ConfigEnvelope {
         path: path.to_string_lossy().to_string(),
         config,
+        active_preset: read_active_preset()?,
     })
 }
 
 #[tauri::command]
 fn save_config(config: Value) -> Result<(), String> {
     let path = ensure_config_file()?;
-    let temp = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
-    fs::write(&temp, text).map_err(|error| error.to_string())?;
-    replace_file(&temp, &path)
+    save_json_file(&path, &config)?;
+    if let Some(active) = read_active_preset()? {
+        let preset_path = preset_json_path(&active)?;
+        if preset_path.exists() {
+            save_json_file(&preset_path, &config)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn list_presets() -> Result<Vec<PresetInfo>, String> {
+    let dir = presets_dir()?;
+    fs::create_dir_all(&dir).map_err(|error| error.to_string())?;
+    let active = read_active_preset()?.unwrap_or_default();
+    let mut presets = Vec::new();
+
+    for entry in fs::read_dir(&dir).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().map_err(|error| error.to_string())?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !is_valid_preset_name(&name) {
+            continue;
+        }
+        let path = entry.path().join(format!("{name}.json"));
+        if !path.exists() {
+            continue;
+        }
+        presets.push(PresetInfo {
+            active: name == active,
+            name,
+            path: path.to_string_lossy().to_string(),
+        });
+    }
+
+    presets.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(presets)
+}
+
+#[tauri::command]
+fn create_preset(config: Value) -> Result<PresetInfo, String> {
+    let name = next_preset_name()?;
+    let path = preset_json_path(&name)?;
+    save_json_file(&path, &config)?;
+    save_json_file(&ensure_config_file()?, &config)?;
+    write_active_preset(&name)?;
+    Ok(PresetInfo {
+        name,
+        path: path.to_string_lossy().to_string(),
+        active: true,
+    })
+}
+
+#[tauri::command]
+fn switch_preset(name: String) -> Result<ConfigEnvelope, String> {
+    let preset_path = preset_json_path(&name)?;
+    if !preset_path.exists() {
+        return Err(format!("preset not found: {name}"));
+    }
+    let text = fs::read_to_string(&preset_path).map_err(|error| error.to_string())?;
+    let config: Value = serde_json::from_str(&text).map_err(|error| error.to_string())?;
+    let path = ensure_config_file()?;
+    save_json_file(&path, &config)?;
+    write_active_preset(&name)?;
+    Ok(ConfigEnvelope {
+        path: path.to_string_lossy().to_string(),
+        config,
+        active_preset: Some(name),
+    })
+}
+
+#[tauri::command]
+fn delete_preset(name: String) -> Result<Option<ConfigEnvelope>, String> {
+    if !is_valid_preset_name(&name) {
+        return Err("invalid preset name".to_string());
+    }
+
+    let dir = presets_dir()?.join(&name);
+    let active = read_active_preset()?.is_some_and(|active| active == name);
+    if !dir.exists() {
+        return Err(format!("preset not found: {name}"));
+    }
+
+    fs::remove_dir_all(&dir).map_err(|error| error.to_string())?;
+    if !active {
+        return Ok(None);
+    }
+
+    clear_active_preset()?;
+    let path = ensure_config_file()?;
+    let config = default_config();
+    save_json_file(&path, &config)?;
+    Ok(Some(ConfigEnvelope {
+        path: path.to_string_lossy().to_string(),
+        config,
+        active_preset: None,
+    }))
 }
 
 #[cfg(windows)]
@@ -179,6 +392,219 @@ fn daemon_candidates() -> Vec<PathBuf> {
     }
 
     paths
+}
+
+fn quote_windows_path(path: &Path) -> String {
+    format!("\"{}\"", path.display())
+}
+
+fn startup_daemon_path() -> Result<PathBuf, String> {
+    daemon_candidates()
+        .into_iter()
+        .find(|path| path.exists())
+        .ok_or_else(|| "could not find hotkeyd.exe; build or install the daemon first".to_string())
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    OsStr::new(value)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
+}
+
+#[cfg(windows)]
+fn query_startup_value() -> Result<Option<String>, String> {
+    let key_path = wide_null(RUN_KEY_PATH);
+    let value_name = wide_null(STARTUP_VALUE_NAME);
+    let mut key = std::ptr::null_mut();
+    let open_result =
+        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, key_path.as_ptr(), 0, KEY_READ, &mut key) };
+    if open_result == ERROR_FILE_NOT_FOUND {
+        return Ok(None);
+    }
+    if open_result != 0 {
+        return Err(format!("could not open startup settings: {open_result}"));
+    }
+
+    let mut value_type = 0;
+    let mut byte_len = 0;
+    let query_result = unsafe {
+        RegQueryValueExW(
+            key,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut value_type,
+            std::ptr::null_mut(),
+            &mut byte_len,
+        )
+    };
+    if query_result == ERROR_FILE_NOT_FOUND {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Ok(None);
+    }
+    if query_result != 0 {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Err(format!("could not read startup setting: {query_result}"));
+    }
+    if value_type != REG_SZ || byte_len < 2 {
+        unsafe {
+            RegCloseKey(key);
+        }
+        return Ok(None);
+    }
+
+    let mut buffer = vec![0u16; (byte_len as usize + 1) / 2];
+    let read_result = unsafe {
+        RegQueryValueExW(
+            key,
+            value_name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut value_type,
+            buffer.as_mut_ptr() as *mut u8,
+            &mut byte_len,
+        )
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if read_result != 0 {
+        return Err(format!("could not read startup setting: {read_result}"));
+    }
+
+    let end = buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(buffer.len());
+    Ok(Some(String::from_utf16_lossy(&buffer[..end])))
+}
+
+#[cfg(windows)]
+fn write_startup_value(command: &str) -> Result<(), String> {
+    let key_path = wide_null(RUN_KEY_PATH);
+    let value_name = wide_null(STARTUP_VALUE_NAME);
+    let mut key = std::ptr::null_mut();
+    let create_result = unsafe {
+        RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            key_path.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            REG_OPTION_NON_VOLATILE,
+            KEY_SET_VALUE,
+            std::ptr::null(),
+            &mut key,
+            std::ptr::null_mut(),
+        )
+    };
+    if create_result != 0 {
+        return Err(format!("could not open startup settings: {create_result}"));
+    }
+
+    let value = wide_null(command);
+    let byte_len = (value.len() * std::mem::size_of::<u16>()) as u32;
+    let set_result = unsafe {
+        RegSetValueExW(
+            key,
+            value_name.as_ptr(),
+            0,
+            REG_SZ,
+            value.as_ptr() as *const u8,
+            byte_len,
+        )
+    };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if set_result != 0 {
+        return Err(format!("could not save startup setting: {set_result}"));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn delete_startup_value() -> Result<(), String> {
+    let key_path = wide_null(RUN_KEY_PATH);
+    let value_name = wide_null(STARTUP_VALUE_NAME);
+    let mut key = std::ptr::null_mut();
+    let open_result = unsafe {
+        RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            key_path.as_ptr(),
+            0,
+            KEY_SET_VALUE,
+            &mut key,
+        )
+    };
+    if open_result == ERROR_FILE_NOT_FOUND {
+        return Ok(());
+    }
+    if open_result != 0 {
+        return Err(format!("could not open startup settings: {open_result}"));
+    }
+
+    let delete_result = unsafe { RegDeleteValueW(key, value_name.as_ptr()) };
+    unsafe {
+        RegCloseKey(key);
+    }
+    if delete_result != 0 && delete_result != ERROR_FILE_NOT_FOUND {
+        return Err(format!("could not remove startup setting: {delete_result}"));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn daemon_startup_status() -> Result<StartupStatus, String> {
+    #[cfg(windows)]
+    {
+        let value = query_startup_value()?;
+        let Some(command) = value else {
+            return Ok(StartupStatus {
+                enabled: false,
+                path: None,
+                detail: "Daemon will not start with Windows.".to_string(),
+            });
+        };
+
+        Ok(StartupStatus {
+            enabled: true,
+            path: Some(command.clone()),
+            detail: format!("Windows starts the daemon with: {command}"),
+        })
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(StartupStatus {
+            enabled: false,
+            path: None,
+            detail: "Startup registration is only available on Windows.".to_string(),
+        })
+    }
+}
+
+#[tauri::command]
+fn set_daemon_startup(enabled: bool) -> Result<StartupStatus, String> {
+    #[cfg(windows)]
+    {
+        if enabled {
+            let daemon = startup_daemon_path()?;
+            write_startup_value(&quote_windows_path(&daemon))?;
+        } else {
+            delete_startup_value()?;
+        }
+        daemon_startup_status()
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("startup registration is only available on Windows".to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -270,6 +696,46 @@ fn send_daemon_command(command: String) -> Result<String, String> {
         .to_string())
 }
 
+fn parse_count_line(status: &str, prefix: &str) -> u32 {
+    status
+        .lines()
+        .find_map(|line| line.trim().strip_prefix(prefix))
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+#[tauri::command]
+fn browser_bridge_status() -> Result<BrowserBridgeStatus, String> {
+    let status = send_pipe_raw("browser_status")
+        .and_then(|response| {
+            let value: Value =
+                serde_json::from_str(&response).map_err(|error| error.to_string())?;
+            if !value.get("ok").and_then(Value::as_bool).unwrap_or(false) {
+                return Err(value
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("browser bridge status failed")
+                    .to_string());
+            }
+            Ok(value
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string())
+        })
+        .unwrap_or_else(|error| format!("Daemon is not responding: {error}"));
+
+    let clients = parse_count_line(&status, "browser bridge clients:");
+    let targets = parse_count_line(&status, "browser targets:");
+
+    Ok(BrowserBridgeStatus {
+        connected: clients > 0,
+        clients,
+        targets,
+        detail: status,
+    })
+}
+
 #[tauri::command]
 fn ensure_daemon() -> Result<(), String> {
     if send_pipe_raw("status").is_ok() {
@@ -316,10 +782,31 @@ fn select_script_path() -> Option<String> {
     rfd::FileDialog::new()
         .add_filter(
             "Scripts and executables",
-            &["exe", "com", "py", "pyw", "ps1", "bat", "cmd", "js", "mjs", "cjs", "vbs", "wsf", "ahk"],
+            &[
+                "exe", "com", "py", "pyw", "ps1", "bat", "cmd", "js", "mjs", "cjs", "vbs", "wsf",
+                "ahk",
+            ],
         )
         .pick_file()
         .map(|path| path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn open_browser_extensions_page(browser: String) -> Result<(), String> {
+    // Replace these search URLs with the exact store listing URLs after publishing.
+    let (exe, url) = match browser.as_str() {
+        "brave" => ("brave.exe", "https://chromewebstore.google.com/search/Hotkey%20To%20Command%20Media%20Bridge"),
+        "chrome" => ("chrome.exe", "https://chromewebstore.google.com/search/Hotkey%20To%20Command%20Media%20Bridge"),
+        "edge" => ("msedge.exe", "https://microsoftedge.microsoft.com/addons/search/Hotkey%20To%20Command%20Media%20Bridge"),
+        _ => return Err("unknown browser".to_string()),
+    };
+
+    let mut command = Command::new("cmd");
+    command.args(["/C", "start", "", exe, url]);
+    #[cfg(windows)]
+    command.creation_flags(0x08000000);
+    command.spawn().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 fn main() {
@@ -327,10 +814,18 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
+            list_presets,
+            create_preset,
+            switch_preset,
+            delete_preset,
             ensure_daemon,
             send_daemon_command,
+            daemon_startup_status,
+            set_daemon_startup,
+            browser_bridge_status,
             select_app_path,
-            select_script_path
+            select_script_path,
+            open_browser_extensions_page
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hotkey To Command UI");
