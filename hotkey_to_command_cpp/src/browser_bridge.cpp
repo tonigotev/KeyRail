@@ -254,6 +254,7 @@ MediaTarget parseTarget(const json& value) {
     target.artist = utf8ToWide(value.value("artist", ""));
     target.sourceHost = utf8ToWide(value.value("site", ""));
     target.favIconUrl = utf8ToWide(value.value("favIconUrl", ""));
+    target.artworkUrl = utf8ToWide(value.value("artworkUrl", ""));
     target.url = utf8ToWide(value.value("url", ""));
     target.documentTitle = utf8ToWide(value.value("documentTitle", ""));
     target.tabTitle = utf8ToWide(value.value("tabTitle", ""));

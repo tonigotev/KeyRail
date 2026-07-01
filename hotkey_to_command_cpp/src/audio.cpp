@@ -4,6 +4,7 @@
 
 #include <windows.h>
 #include <mmdeviceapi.h>
+#include <endpointvolume.h>
 #include <wrl/client.h>
 #include <propvarutil.h>
 #include <vector>
@@ -136,4 +137,61 @@ bool cycleAudioDevice(std::wstring* outName) {
 
 bool cycleMicrophoneDevice(std::wstring* outName) {
     return cycleDefaultEndpoint(eCapture, outName);
+}
+
+static bool defaultCaptureVolume(ComPtr<IAudioEndpointVolume>& volume, std::wstring* report) {
+    ComPtr<IMMDeviceEnumerator> enumr;
+    HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumr));
+    if (FAILED(hr)) {
+        if (report) *report = L"could not create audio device enumerator";
+        return false;
+    }
+
+    ComPtr<IMMDevice> dev;
+    hr = enumr->GetDefaultAudioEndpoint(eCapture, eConsole, &dev);
+    if (FAILED(hr)) hr = enumr->GetDefaultAudioEndpoint(eCapture, eCommunications, &dev);
+    if (FAILED(hr)) {
+        if (report) *report = L"could not find a default microphone";
+        return false;
+    }
+
+    hr = dev->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr, &volume);
+    if (FAILED(hr)) {
+        if (report) *report = L"could not open microphone volume control";
+        return false;
+    }
+    return true;
+}
+
+bool setDefaultMicrophoneMute(bool muted, std::wstring* report) {
+    ComInit com;
+    ComPtr<IAudioEndpointVolume> volume;
+    if (!defaultCaptureVolume(volume, report)) return false;
+
+    HRESULT hr = volume->SetMute(muted ? TRUE : FALSE, nullptr);
+    if (FAILED(hr)) {
+        if (report) *report = muted ? L"could not mute microphone" : L"could not unmute microphone";
+        return false;
+    }
+
+    if (report) *report = muted ? L"microphone muted" : L"microphone unmuted";
+    return true;
+}
+
+bool getDefaultMicrophoneMute(bool* muted, std::wstring* report) {
+    if (!muted) return false;
+    ComInit com;
+    ComPtr<IAudioEndpointVolume> volume;
+    if (!defaultCaptureVolume(volume, report)) return false;
+
+    BOOL value = FALSE;
+    HRESULT hr = volume->GetMute(&value);
+    if (FAILED(hr)) {
+        if (report) *report = L"could not read microphone mute state";
+        return false;
+    }
+
+    *muted = value == TRUE;
+    if (report) *report = *muted ? L"microphone is muted" : L"microphone is unmuted";
+    return true;
 }

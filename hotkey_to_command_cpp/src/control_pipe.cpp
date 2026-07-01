@@ -1,6 +1,7 @@
 #include "control_pipe.h"
 
 #include "browser_bridge.h"
+#include "clipboard_history.h"
 #include "media_sessions.h"
 
 #include <nlohmann/json.hpp>
@@ -98,6 +99,11 @@ void ControlPipe::run() {
                         json out;
                         out["ok"] = true;
                         out["status"] = wideToUtf8(describeBrowserBridgeStatus());
+                        response = out.dump();
+                    } else if (command == "clipboard_status") {
+                        json out;
+                        out["ok"] = true;
+                        out["status"] = wideToUtf8(describeClipboardHistory());
                         response = out.dump();
                     } else if (command == "quit") {
                         PostThreadMessageW(targetThreadId_, quitMessage_, 0, 0);

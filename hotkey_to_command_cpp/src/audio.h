@@ -10,3 +10,7 @@ bool cycleAudioDevice(std::wstring* outName = nullptr);
 // Returns true on success; if outName is non-null, it receives the new
 // device's friendly name.
 bool cycleMicrophoneDevice(std::wstring* outName = nullptr);
+
+// Mute/unmute the current default capture endpoint.
+bool setDefaultMicrophoneMute(bool muted, std::wstring* report = nullptr);
+bool getDefaultMicrophoneMute(bool* muted, std::wstring* report = nullptr);

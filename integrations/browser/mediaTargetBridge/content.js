@@ -48,12 +48,16 @@
   function mediaSessionInfo() {
     const session = navigator.mediaSession;
     const metadata = session?.metadata;
+    const artwork = Array.isArray(metadata?.artwork) && metadata.artwork.length
+      ? metadata.artwork[metadata.artwork.length - 1]?.src || ""
+      : "";
     return {
       supported: Boolean(session),
       playbackState: session?.playbackState || "none",
       title: metadata?.title || "",
       artist: metadata?.artist || "",
-      album: metadata?.album || ""
+      album: metadata?.album || "",
+      artwork
     };
   }
 
@@ -108,6 +112,7 @@
           mediaSessionPlaybackState: sessionInfo.playbackState,
           mediaSessionTitle: sessionInfo.title,
           mediaSessionArtist: sessionInfo.artist,
+          artworkUrl: sessionInfo.artwork,
           currentTime: Number.isFinite(element.currentTime) ? element.currentTime : 0,
           duration: Number.isFinite(element.duration) ? element.duration : 0,
           canPlayPause: true,
@@ -138,6 +143,7 @@
         mediaSessionPlaybackState: sessionInfo.playbackState,
         mediaSessionTitle: sessionInfo.title,
         mediaSessionArtist: sessionInfo.artist,
+        artworkUrl: sessionInfo.artwork,
         currentTime: 0,
         duration: 0,
         canPlayPause: false,

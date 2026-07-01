@@ -8,6 +8,7 @@
 #include <string>
 
 #include "browser_bridge.h"
+#include "clipboard_history.h"
 #include "config.h"
 #include "control_pipe.h"
 #include "discord_bridge.h"
@@ -16,6 +17,7 @@
 static constexpr UINT WM_HOTKEYD_RELOAD = WM_APP + 1;
 static constexpr UINT WM_HOTKEYD_QUIT = WM_APP + 2;
 static constexpr int QUIT_HOTKEY_ID = 9000;
+static constexpr wchar_t kSingleInstanceMutex[] = L"Local\\HotkeyToCommandHotkeyd";
 
 struct DaemonState {
     HotkeyRegistry registry;
@@ -59,6 +61,15 @@ static void loadAndApply(DaemonState& state, bool keepPreviousOnFailure) {
 }
 
 int main() {
+    HANDLE singleInstance = CreateMutexW(nullptr, TRUE, kSingleInstanceMutex);
+    if (!singleInstance) {
+        return 1;
+    }
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        CloseHandle(singleInstance);
+        return 0;
+    }
+
     DWORD mainThreadId = GetCurrentThreadId();
     MSG bootstrapMsg;
     PeekMessageW(&bootstrapMsg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
@@ -69,6 +80,7 @@ int main() {
     wprintf(L"hotkeyd starting\n");
     startDiscordBridge();
     startBrowserMediaBridge();
+    startClipboardHistory();
 
     loadAndApply(state, false);
 
@@ -107,13 +119,19 @@ int main() {
             state.registry.handleTimer(msg.wParam);
             continue;
         }
+
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
 
     pipe.stop();
+    stopClipboardHistory();
     stopBrowserMediaBridge();
     stopDiscordBridge();
     state.registry.clear();
     UnregisterHotKey(nullptr, QUIT_HOTKEY_ID);
+    ReleaseMutex(singleInstance);
+    CloseHandle(singleInstance);
     wprintf(L"bye\n");
     return 0;
 }

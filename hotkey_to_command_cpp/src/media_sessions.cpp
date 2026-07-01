@@ -3,22 +3,36 @@
 #include "browser_bridge.h"
 
 #include <windows.h>
+#include <wincodec.h>
+#include <objidl.h>
+
+// gdiplus.h uses unqualified min/max; the project builds with NOMINMAX, so make
+// std::min/std::max visible at namespace scope before including it.
+#include <algorithm>
+using std::min;
+using std::max;
+#include <gdiplus.h>
 
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Media.Control.h>
+#include <winrt/Windows.Storage.Streams.h>
 #include <winrt/base.h>
 
 #include <algorithm>
 #include <cwctype>
+#include <cstdint>
+#include <cstring>
 #include <functional>
 #include <mutex>
+#include <string_view>
 #include <sstream>
 #include <thread>
 
 using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSession;
 using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionManager;
 using winrt::Windows::Media::Control::GlobalSystemMediaTransportControlsSessionPlaybackStatus;
+using winrt::Windows::Storage::Streams::DataReader;
 
 namespace {
 
@@ -29,6 +43,146 @@ constexpr int kPickerWidth = 612;
 constexpr int kToastWidth = 460;
 constexpr int kOverlayMargin = 36;
 constexpr int kOverlayTopMargin = 72;
+
+ULONG_PTR g_gdiplusToken = 0;
+
+void ensureGdiplus() {
+    if (g_gdiplusToken) return;
+    Gdiplus::GdiplusStartupInput input;
+    Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr);
+}
+
+Gdiplus::Color gpColor(COLORREF c, BYTE a = 255) {
+    return Gdiplus::Color(a, GetRValue(c), GetGValue(c), GetBValue(c));
+}
+
+constexpr COLORREF kAccent = RGB(92, 142, 255);
+constexpr COLORREF kPanel = RGB(29, 31, 39);
+constexpr COLORREF kPanelBorder = RGB(58, 61, 72);
+
+std::string wideToNarrowAscii(const std::wstring& value) {
+    std::string out;
+    out.reserve(value.size());
+    for (wchar_t c : value) {
+        out.push_back(c <= 0x7f ? static_cast<char>(c) : '?');
+    }
+    return out;
+}
+
+int base64Value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+bool decodeBase64(std::string_view input, std::vector<uint8_t>& out) {
+    out.clear();
+    int value = 0;
+    int bits = -8;
+    for (char c : input) {
+        if (c == '=') break;
+        if (c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
+        const int decoded = base64Value(c);
+        if (decoded < 0) return false;
+        value = (value << 6) + decoded;
+        bits += 6;
+        if (bits >= 0) {
+            out.push_back(static_cast<uint8_t>((value >> bits) & 0xff));
+            bits -= 8;
+        }
+    }
+    return !out.empty();
+}
+
+bool decodeDataUrlBytes(const std::wstring& url, std::vector<uint8_t>& bytes) {
+    const std::string text = wideToNarrowAscii(url);
+    if (text.rfind("data:", 0) != 0) return false;
+    const size_t comma = text.find(',');
+    if (comma == std::string::npos) return false;
+    const std::string header = text.substr(0, comma);
+    if (header.find(";base64") == std::string::npos) return false;
+    return decodeBase64(std::string_view(text).substr(comma + 1), bytes);
+}
+
+void decodeImageBytes(const std::vector<uint8_t>& bytes, std::vector<uint8_t>& bgra, int& width, int& height) {
+    if (bytes.empty() || bytes.size() > 4 * 1024 * 1024) return;
+
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+    if (!hg) return;
+    void* ptr = GlobalLock(hg);
+    if (!ptr) { GlobalFree(hg); return; }
+    memcpy(ptr, bytes.data(), bytes.size());
+    GlobalUnlock(hg);
+
+    IStream* pStream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(hg, TRUE, &pStream)) || !pStream) {
+        GlobalFree(hg);
+        return;
+    }
+
+    IWICImagingFactory* pFactory = nullptr;
+    CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER,
+                     IID_IWICImagingFactory, reinterpret_cast<void**>(&pFactory));
+    if (!pFactory) { pStream->Release(); return; }
+
+    IWICBitmapDecoder* pDecoder = nullptr;
+    pFactory->CreateDecoderFromStream(pStream, nullptr, WICDecodeMetadataCacheOnLoad, &pDecoder);
+    pStream->Release();
+
+    if (pDecoder) {
+        IWICBitmapFrameDecode* pFrame = nullptr;
+        pDecoder->GetFrame(0, &pFrame);
+        pDecoder->Release();
+
+        if (pFrame) {
+            IWICFormatConverter* pConv = nullptr;
+            pFactory->CreateFormatConverter(&pConv);
+            if (pConv) {
+                pConv->Initialize(pFrame, GUID_WICPixelFormat32bppBGRA,
+                    WICBitmapDitherTypeNone, nullptr, 0.0f, WICBitmapPaletteTypeCustom);
+                UINT w = 0, h = 0;
+                pConv->GetSize(&w, &h);
+                if (w > 0 && h > 0 && w <= 2048 && h <= 2048) {
+                    width = static_cast<int>(w);
+                    height = static_cast<int>(h);
+                    bgra.resize(static_cast<size_t>(w) * h * 4);
+                    pConv->CopyPixels(nullptr, w * 4,
+                        static_cast<UINT>(bgra.size()),
+                        bgra.data());
+                }
+                pConv->Release();
+            }
+            pFrame->Release();
+        }
+    }
+    pFactory->Release();
+}
+
+void decodeImageBytesIntoArtwork(const std::vector<uint8_t>& bytes, MediaTarget& target) {
+    decodeImageBytes(bytes, target.artworkBgra, target.artworkWidth, target.artworkHeight);
+}
+
+void decodeImageBytesIntoFavicon(const std::vector<uint8_t>& bytes, MediaTarget& target) {
+    decodeImageBytes(bytes, target.favIconBgra, target.favIconWidth, target.favIconHeight);
+}
+
+// Build a rounded-rectangle path. Inset by 0.5px so a 1px stroke lands crisply.
+void addRoundedRect(Gdiplus::GraphicsPath& path, Gdiplus::RectF r, float radius) {
+    const float d = radius * 2.0f;
+    path.Reset();
+    if (radius <= 0.0f) {
+        path.AddRectangle(r);
+        return;
+    }
+    path.AddArc(r.X, r.Y, d, d, 180, 90);
+    path.AddArc(r.X + r.Width - d, r.Y, d, d, 270, 90);
+    path.AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
+    path.AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
+    path.CloseFigure();
+}
 
 std::mutex g_pickerMutex;
 std::vector<MediaTarget> g_pickerTargets;
@@ -70,6 +224,29 @@ std::wstring lowerCopy(std::wstring value) {
         return static_cast<wchar_t>(towlower(c));
     });
     return value;
+}
+
+void fetchSmtcThumbnail(const GlobalSystemMediaTransportControlsSession& session, MediaTarget& target) {
+    try {
+        auto props = session.TryGetMediaPropertiesAsync().get();
+        auto thumbRef = props.Thumbnail();
+        if (!thumbRef) return;
+
+        auto stream = thumbRef.OpenReadAsync().get();
+        if (!stream) return;
+
+        const uint64_t size = stream.Size();
+        if (size == 0 || size > 4 * 1024 * 1024) return;
+
+        DataReader reader(stream);
+        reader.LoadAsync(static_cast<uint32_t>(size)).get();
+        std::vector<uint8_t> bytes(static_cast<size_t>(size));
+        reader.ReadBytes(winrt::array_view<uint8_t>(bytes));
+        reader.DetachStream();
+        decodeImageBytesIntoArtwork(bytes, target);
+    } catch (...) {
+        // Leave artworkBgra empty on any failure.
+    }
 }
 
 std::wstring statusName(GlobalSystemMediaTransportControlsSessionPlaybackStatus status) {
@@ -152,6 +329,23 @@ void replaceBrowserAppSessionsWhenTabsExist(
     if (hiddenBrowserAppSessions) *hiddenBrowserAppSessions = before - targets.size();
 }
 
+void hydrateBrowserArtwork(std::vector<MediaTarget>& targets) {
+    for (MediaTarget& target : targets) {
+        if (target.artworkBgra.empty() && !target.artworkUrl.empty()) {
+            std::vector<uint8_t> bytes;
+            if (decodeDataUrlBytes(target.artworkUrl, bytes)) {
+                decodeImageBytesIntoArtwork(bytes, target);
+            }
+        }
+        if (target.favIconBgra.empty() && !target.favIconUrl.empty()) {
+            std::vector<uint8_t> iconBytes;
+            if (decodeDataUrlBytes(target.favIconUrl, iconBytes)) {
+                decodeImageBytesIntoFavicon(iconBytes, target);
+            }
+        }
+    }
+}
+
 std::wstring hostFromUrl(const std::wstring& url) {
     size_t start = url.find(L"://");
     start = start == std::wstring::npos ? 0 : start + 3;
@@ -177,7 +371,7 @@ std::wstring sourceName(const MediaTarget& target) {
 std::wstring commandToastText(MediaCommand command) {
     switch (command) {
     case MediaCommand::TogglePlayPause:
-        return L"Play / pause sent";
+        return L"Play/pause sent";
     case MediaCommand::Next:
         return L"Next track sent";
     case MediaCommand::Previous:
@@ -230,23 +424,51 @@ HFONT makeFont(int height, int weight = FW_NORMAL) {
 }
 
 void fillRoundRect(HDC dc, const RECT& rect, int radius, COLORREF fill, COLORREF border = static_cast<COLORREF>(-1)) {
-    HBRUSH brush = CreateSolidBrush(fill);
-    HPEN pen = border == static_cast<COLORREF>(-1)
-        ? static_cast<HPEN>(GetStockObject(NULL_PEN))
-        : CreatePen(PS_SOLID, 1, border);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    RoundRect(dc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    if (border != static_cast<COLORREF>(-1)) DeleteObject(pen);
-    DeleteObject(brush);
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    const bool hasBorder = border != static_cast<COLORREF>(-1);
+    // Inset by 0.5px so the 1px stroke is fully inside the fill (crisp edge).
+    const float inset = hasBorder ? 0.5f : 0.0f;
+    Gdiplus::RectF r(
+        static_cast<Gdiplus::REAL>(rect.left) + inset,
+        static_cast<Gdiplus::REAL>(rect.top) + inset,
+        static_cast<Gdiplus::REAL>(rect.right - rect.left) - inset * 2.0f - (hasBorder ? 1.0f : 0.0f),
+        static_cast<Gdiplus::REAL>(rect.bottom - rect.top) - inset * 2.0f - (hasBorder ? 1.0f : 0.0f));
+
+    Gdiplus::GraphicsPath path;
+    addRoundedRect(path, r, static_cast<float>(radius));
+
+    Gdiplus::SolidBrush brush(gpColor(fill));
+    g.FillPath(&brush, &path);
+    if (hasBorder) {
+        Gdiplus::Pen pen(gpColor(border), 1.0f);
+        g.DrawPath(&pen, &path);
+    }
 }
 
 void fillRectColor(HDC dc, const RECT& rect, COLORREF color) {
     HBRUSH brush = CreateSolidBrush(color);
     FillRect(dc, &rect, brush);
     DeleteObject(brush);
+}
+
+void drawOverlayShell(HDC dc, const RECT& panel, COLORREF accent = kAccent) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    Gdiplus::RectF edge(
+        static_cast<float>(panel.left) + 0.5f,
+        static_cast<float>(panel.top) + 0.5f,
+        static_cast<float>(panel.right - panel.left) - 1.0f,
+        static_cast<float>(panel.bottom - panel.top) - 1.0f);
+    Gdiplus::GraphicsPath path;
+    addRoundedRect(path, edge, 17.0f);
+
+    Gdiplus::Pen glow(gpColor(accent, 110), 1.4f);
+    g.DrawPath(&glow, &path);
 }
 
 void drawTextLine(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLORREF color, UINT align = DT_LEFT) {
@@ -257,84 +479,244 @@ void drawTextLine(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLOR
     SelectObject(dc, oldFont);
 }
 
-void drawShortcut(HDC dc, int x, int y, const std::wstring& key, const std::wstring& label, HFONT keyFont, HFONT labelFont) {
-    const int keyWidth = key.size() <= 3 ? 40 : 52;
-    RECT keyRect{x, y, x + keyWidth, y + 24};
-    fillRoundRect(dc, keyRect, 6, RGB(38, 40, 48), RGB(70, 73, 84));
-    drawTextLine(dc, key, keyRect, keyFont, RGB(238, 240, 245), DT_CENTER);
+// Draw a raised keycap pill background at the given rect (antialiased, top-light gradient).
+void drawKeycap(HDC dc, const RECT& r) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
 
-    RECT labelRect{keyRect.right + 8, y, keyRect.right + 140, y + 24};
-    drawTextLine(dc, label, labelRect, labelFont, RGB(160, 164, 176));
+    const float radius = 6.0f;
+
+    // Soft bottom shadow.
+    Gdiplus::RectF shadow(static_cast<float>(r.left) + 0.5f, static_cast<float>(r.top) + 1.0f,
+                          static_cast<float>(r.right - r.left) - 1.0f, static_cast<float>(r.bottom - r.top));
+    Gdiplus::GraphicsPath shadowPath;
+    addRoundedRect(shadowPath, shadow, radius);
+    Gdiplus::SolidBrush shadowBrush(gpColor(RGB(8, 10, 16), 55));
+    g.FillPath(&shadowBrush, &shadowPath);
+
+    // Body with vertical top-light gradient.
+    Gdiplus::RectF body(static_cast<float>(r.left) + 0.5f, static_cast<float>(r.top) + 0.5f,
+                        static_cast<float>(r.right - r.left) - 1.0f, static_cast<float>(r.bottom - r.top) - 1.0f);
+    Gdiplus::GraphicsPath bodyPath;
+    addRoundedRect(bodyPath, body, radius);
+    Gdiplus::LinearGradientBrush grad(
+        Gdiplus::PointF(body.X, body.Y),
+        Gdiplus::PointF(body.X, body.Y + body.Height),
+        gpColor(RGB(58, 63, 82)), gpColor(RGB(38, 42, 58)));
+    g.FillPath(&grad, &bodyPath);
+
+    // Border: lighter top, darker bottom — draw full border then overlay a darker bottom arc.
+    Gdiplus::Pen border(gpColor(RGB(73, 79, 104)), 1.0f);
+    g.DrawPath(&border, &bodyPath);
+}
+
+// Glyph: two facing triangles (◀ ▶) representing prev/next navigation.
+void drawGlyphNavPair(HDC dc, const RECT& r, COLORREF color) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    Gdiplus::SolidBrush b(gpColor(color));
+    const float cx = (r.left + r.right) / 2.0f;
+    const float cy = (r.top + r.bottom) / 2.0f;
+    Gdiplus::PointF leftTri[]{{cx - 8, cy}, {cx - 2, cy - 5}, {cx - 2, cy + 5}};
+    g.FillPolygon(&b, leftTri, 3);
+    Gdiplus::PointF rightTri[]{{cx + 8, cy}, {cx + 2, cy - 5}, {cx + 2, cy + 5}};
+    g.FillPolygon(&b, rightTri, 3);
+}
+
+// Glyph: play triangle + pause bars (▶⏸).
+void drawGlyphPlayPause(HDC dc, const RECT& r, COLORREF color) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::SolidBrush b(gpColor(color));
+    const float cx = (r.left + r.right) / 2.0f;
+    const float cy = (r.top + r.bottom) / 2.0f;
+    Gdiplus::PointF tri[]{{cx - 7, cy - 5}, {cx - 7, cy + 5}, {cx - 1, cy}};
+    g.FillPolygon(&b, tri, 3);
+    g.FillRectangle(&b, Gdiplus::RectF(cx + 1.0f, cy - 5.0f, 2.0f, 10.0f));
+    g.FillRectangle(&b, Gdiplus::RectF(cx + 5.0f, cy - 5.0f, 2.0f, 10.0f));
+}
+
+// Neutral artwork placeholder: simple music note (antialiased).
+void drawMusicNote(HDC dc, const RECT& art, COLORREF color) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    const float cx = (art.left + art.right) / 2.0f;
+    const float cy = (art.top + art.bottom) / 2.0f;
+    Gdiplus::SolidBrush b(gpColor(color));
+    Gdiplus::Pen p(gpColor(color), 2.0f);
+    p.SetStartCap(Gdiplus::LineCapRound);
+    p.SetEndCap(Gdiplus::LineCapRound);
+    p.SetLineJoin(Gdiplus::LineJoinRound);
+
+    // Stem
+    g.FillRectangle(&b, Gdiplus::RectF(cx, cy - 9.0f, 2.0f, 11.0f));
+    // Flag
+    Gdiplus::PointF flag[]{{cx + 2, cy - 9}, {cx + 8, cy - 6}, {cx + 8, cy - 3}};
+    g.DrawLines(&p, flag, 3);
+    // Note head
+    g.FillEllipse(&b, Gdiplus::RectF(cx - 5.0f, cy, 7.0f, 5.0f));
+}
+
+enum class ShortcutGlyph { None, NavPair, PlayPause };
+
+void drawShortcut(HDC dc, int x, int y, ShortcutGlyph glyph, const std::wstring& keyText,
+                  const std::wstring& label, HFONT keyFont, HFONT labelFont) {
+    const int keyH = 22;
+    const int keyWidth = glyph != ShortcutGlyph::None ? 44
+                       : keyText.size() <= 3          ? 40
+                                                      : 54;
+    RECT keyRect{x, y + 1, x + keyWidth, y + 1 + keyH};
+    drawKeycap(dc, keyRect);
+
+    constexpr COLORREF glyphColor = RGB(210, 216, 238);
+    if (glyph == ShortcutGlyph::NavPair) {
+        drawGlyphNavPair(dc, keyRect, glyphColor);
+    } else if (glyph == ShortcutGlyph::PlayPause) {
+        drawGlyphPlayPause(dc, keyRect, glyphColor);
+    } else {
+        drawTextLine(dc, keyText, keyRect, keyFont, RGB(228, 234, 250), DT_CENTER);
+    }
+
+    RECT labelRect{keyRect.right + 8, y, keyRect.right + 160, y + keyH + 2};
+    drawTextLine(dc, label, labelRect, labelFont, RGB(144, 149, 166));
 }
 
 void drawPlaybackBadge(HDC dc, const RECT& art, bool playing) {
-    const int radius = 10;
-    const int cx = art.right - 5;
-    const int cy = art.bottom - 5;
-    HBRUSH brush = CreateSolidBrush(playing ? RGB(92, 142, 255) : RGB(78, 82, 94));
-    HPEN pen = CreatePen(PS_SOLID, 1, RGB(14, 16, 23));
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-    HGDIOBJ oldPen = SelectObject(dc, pen);
-    Ellipse(dc, cx - radius, cy - radius, cx + radius, cy + radius);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(pen);
-    DeleteObject(brush);
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
 
-    HBRUSH mark = CreateSolidBrush(RGB(9, 11, 16));
-    oldBrush = SelectObject(dc, mark);
-    oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    const float radius = 9.0f;
+    const float cx = art.right - 5.0f;
+    const float cy = art.bottom - 5.0f;
+
+    // Dark ring behind the badge so it reads against any artwork.
+    Gdiplus::SolidBrush ring(gpColor(RGB(14, 16, 23)));
+    g.FillEllipse(&ring, cx - radius - 1.5f, cy - radius - 1.5f, (radius + 1.5f) * 2.0f, (radius + 1.5f) * 2.0f);
+
+    Gdiplus::SolidBrush body(gpColor(playing ? kAccent : RGB(78, 82, 94)));
+    g.FillEllipse(&body, cx - radius, cy - radius, radius * 2.0f, radius * 2.0f);
+
+    Gdiplus::SolidBrush mark(gpColor(playing ? RGB(12, 16, 28) : RGB(232, 236, 245)));
     if (playing) {
-        POINT triangle[]{{cx - 3, cy - 5}, {cx - 3, cy + 5}, {cx + 5, cy}};
-        Polygon(dc, triangle, 3);
+        Gdiplus::PointF tri[]{{cx - 2.5f, cy - 4.0f}, {cx - 2.5f, cy + 4.0f}, {cx + 4.0f, cy}};
+        g.FillPolygon(&mark, tri, 3);
     } else {
-        RECT left{cx - 4, cy - 5, cx - 1, cy + 5};
-        RECT right{cx + 2, cy - 5, cx + 5, cy + 5};
-        FillRect(dc, &left, mark);
-        FillRect(dc, &right, mark);
+        g.FillRectangle(&mark, Gdiplus::RectF(cx - 3.5f, cy - 4.0f, 2.5f, 8.0f));
+        g.FillRectangle(&mark, Gdiplus::RectF(cx + 1.0f, cy - 4.0f, 2.5f, 8.0f));
     }
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(mark);
 }
 
-void drawArtwork(HDC dc, const RECT& art, const MediaTarget& target, bool selected) {
-    fillRoundRect(dc, art, 9, artworkColor(target), selected ? RGB(92, 142, 255) : RGB(46, 49, 58));
+// Filled accent circle with a centered checkmark (antialiased, round caps).
+void drawCheckBadge(HDC dc, const RECT& circle, COLORREF fill, COLORREF tick) {
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
 
-    if (!target.playing) {
-        HPEN pen = CreatePen(PS_SOLID, 1, RGB(125, 132, 150));
-        HGDIOBJ oldPen = SelectObject(dc, pen);
-        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-        POINT triangle[]{{art.left + 19, art.top + 16}, {art.left + 19, art.top + 30}, {art.left + 30, art.top + 23}};
-        Polygon(dc, triangle, 3);
-        SelectObject(dc, oldBrush);
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
+    Gdiplus::SolidBrush brush(gpColor(fill));
+    g.FillEllipse(&brush, static_cast<float>(circle.left), static_cast<float>(circle.top),
+                  static_cast<float>(circle.right - circle.left), static_cast<float>(circle.bottom - circle.top));
+
+    const float cx = (circle.left + circle.right) / 2.0f;
+    const float cy = (circle.top + circle.bottom) / 2.0f;
+    const float s = (circle.right - circle.left) / 18.0f; // scale relative to ~18px circle
+    Gdiplus::Pen pen(gpColor(tick), 2.0f * s);
+    pen.SetStartCap(Gdiplus::LineCapRound);
+    pen.SetEndCap(Gdiplus::LineCapRound);
+    pen.SetLineJoin(Gdiplus::LineJoinRound);
+    Gdiplus::PointF check[]{
+        {cx - 4.0f * s, cy + 0.3f * s},
+        {cx - 1.2f * s, cy + 3.2f * s},
+        {cx + 4.2f * s, cy - 3.0f * s}};
+    g.DrawLines(&pen, check, 3);
+}
+
+void drawBgraImage(HDC dc, const RECT& rect, const std::vector<uint8_t>& bgra, int width, int height, float radius);
+
+void drawArtwork(HDC dc, const RECT& art, const MediaTarget& target, bool selected) {
+    fillRoundRect(dc, art, 9, artworkColor(target), selected ? kAccent : RGB(46, 49, 58));
+
+    if (!target.artworkBgra.empty() && target.artworkWidth > 0 && target.artworkHeight > 0) {
+        drawBgraImage(dc, art, target.artworkBgra, target.artworkWidth, target.artworkHeight, 9.0f);
+    } else {
+        // Neutral source glyph — no play/pause indicator on the thumbnail.
+        drawMusicNote(dc, art, RGB(96, 102, 124));
     }
 
     drawPlaybackBadge(dc, art, target.playing);
 }
 
 void drawEqualizer(HDC dc, int x, int y, COLORREF color) {
-    HBRUSH brush = CreateSolidBrush(color);
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+    Gdiplus::SolidBrush brush(gpColor(color));
     const int heights[] = {13, 23, 17};
     for (int i = 0; i < 3; ++i) {
-        RECT bar{x + i * 5, y + 24 - heights[i], x + i * 5 + 3, y + 24};
-        FillRect(dc, &bar, brush);
+        Gdiplus::RectF bar(static_cast<float>(x + i * 5), static_cast<float>(y + 24 - heights[i]),
+                           3.0f, static_cast<float>(heights[i]));
+        Gdiplus::GraphicsPath path;
+        addRoundedRect(path, bar, 1.5f);
+        g.FillPath(&brush, &path);
     }
-    DeleteObject(brush);
+}
+
+SIZE measureText(HDC dc, const std::wstring& text, HFONT font) {
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, text.c_str(), static_cast<int>(text.size()), &sz);
+    SelectObject(dc, oldFont);
+    return sz;
+}
+
+void drawBgraImage(HDC dc, const RECT& rect, const std::vector<uint8_t>& bgra, int width, int height, float radius) {
+    if (bgra.empty() || width <= 0 || height <= 0) return;
+
+    Gdiplus::Graphics g(dc);
+    g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+    g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+    g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
+
+    Gdiplus::RectF clipRect(static_cast<float>(rect.left), static_cast<float>(rect.top),
+                            static_cast<float>(rect.right - rect.left), static_cast<float>(rect.bottom - rect.top));
+    Gdiplus::GraphicsPath clip;
+    addRoundedRect(clip, clipRect, radius);
+    g.SetClip(&clip);
+
+    Gdiplus::Bitmap bmp(width, height, width * 4, PixelFormat32bppARGB, const_cast<BYTE*>(bgra.data()));
+    g.DrawImage(&bmp, clipRect, 0.0f, 0.0f,
+                static_cast<float>(width), static_cast<float>(height), Gdiplus::UnitPixel);
+    g.ResetClip();
 }
 
 void drawSourceChip(HDC dc, int x, int y, const MediaTarget& target, HFONT font) {
-    RECT favicon{x, y + 5, x + 14, y + 19};
-    fillRoundRect(dc, favicon, 3, artworkColor(target, 9), RGB(88, 96, 118));
+    RECT favicon{x, y + 3, x + 13, y + 16};
+    fillRoundRect(dc, favicon, 3, RGB(43, 47, 58), RGB(58, 62, 78));
+    drawBgraImage(dc, favicon, target.favIconBgra, target.favIconWidth, target.favIconHeight, 3.0f);
 
-    RECT hostRect{x + 22, y, x + 150, y + 24};
-    drawTextLine(dc, sourceName(target), hostRect, font, RGB(137, 141, 153));
+    // Host/app name in muted gray — measure it so the tag sits right beside it.
+    const std::wstring name = sourceName(target);
+    const int nameX = x + 20;
+    const int nameMaxRight = x + 188;
+    SIZE nameSize = measureText(dc, name, font);
+    int nameRight = (std::min)(nameX + static_cast<int>(nameSize.cx), nameMaxRight);
+    RECT hostRect{nameX, y - 1, nameRight, y + 18};
+    drawTextLine(dc, name, hostRect, font, RGB(119, 124, 140));
+    if (target.kind != L"browser") return;
 
-    RECT chip{hostRect.right + 6, y + 3, hostRect.right + 38, y + 21};
-    fillRoundRect(dc, chip, 4, RGB(44, 46, 55), RGB(70, 73, 84));
-    drawTextLine(dc, target.kind == L"browser" ? L"TAB" : L"APP", chip, font, RGB(158, 162, 174), DT_CENTER);
+    // Lowercase "tab" or "app" tag — subdued, placed immediately after the name.
+    const std::wstring tag = target.kind == L"browser" ? L"tab" : L"app";
+    SIZE tagSize = measureText(dc, tag, font);
+    const int chipPadX = 6;
+    const int chipLeft = nameRight + 7;
+    const int chipRight = chipLeft + static_cast<int>(tagSize.cx) + chipPadX * 2;
+    RECT chip{chipLeft, y + 1, chipRight, y + 17};
+    fillRoundRect(dc, chip, 4, RGB(35, 37, 46), RGB(47, 50, 61));
+    drawTextLine(dc, tag, chip, font, RGB(102, 107, 124), DT_CENTER);
 }
 
 size_t firstVisibleIndex(size_t count, size_t selected, size_t visibleRows) {
@@ -345,24 +727,28 @@ size_t firstVisibleIndex(size_t count, size_t selected, size_t visibleRows) {
 
 void drawMediaRow(HDC dc, const RECT& row, const MediaTarget& target, bool selected, HFONT titleFont, HFONT bodyFont, HFONT metaFont) {
     if (selected) {
-        fillRoundRect(dc, row, 10, RGB(42, 55, 82), RGB(92, 142, 255));
+        fillRoundRect(dc, row, 10, RGB(42, 55, 82), kAccent);
         RECT edge{row.left, row.top + 8, row.left + 4, row.bottom - 8};
-        fillRoundRect(dc, edge, 4, RGB(92, 142, 255));
+        fillRoundRect(dc, edge, 4, kAccent);
     }
 
-    RECT art{row.left + 18, row.top + 12, row.left + 64, row.top + 58};
+    const int rowHeight = row.bottom - row.top;
+    const int artSize = rowHeight >= 88 ? 58 : 46;
+    const int artTop = row.top + (rowHeight - artSize) / 2;
+    RECT art{row.left + 18, artTop, row.left + 18 + artSize, artTop + artSize};
     drawArtwork(dc, art, target, selected);
 
-    RECT titleRect{art.right + 14, row.top + 11, row.right - 52, row.top + 32};
+    const int textTop = art.top + (artSize >= 58 ? 0 : -1);
+    RECT titleRect{art.right + 14, textTop, row.right - 52, textTop + 22};
     drawTextLine(dc, mediaTitle(target), titleRect, titleFont, RGB(240, 242, 248));
 
-    RECT subtitleRect{titleRect.left, row.top + 32, row.right - 52, row.top + 52};
+    RECT subtitleRect{titleRect.left, titleRect.bottom, row.right - 52, titleRect.bottom + 19};
     drawTextLine(dc, mediaSubtitle(target), subtitleRect, bodyFont, RGB(164, 168, 181));
 
-    drawSourceChip(dc, titleRect.left, row.top + 50, target, metaFont);
+    drawSourceChip(dc, titleRect.left, subtitleRect.bottom - 1, target, metaFont);
 
     if (target.playing) {
-        drawEqualizer(dc, row.right - 30, row.top + 24, RGB(92, 142, 255));
+        drawEqualizer(dc, row.right - 30, row.top + 24, kAccent);
     }
 }
 
@@ -371,24 +757,26 @@ void drawFooter(HDC dc, const RECT& footer, bool picker, bool hasControlledTarge
     fillRectColor(dc, line, RGB(43, 46, 56));
 
     int x = footer.left + 16;
+    const int y = footer.top + 12;
     if (picker) {
-        drawShortcut(dc, x, footer.top + 12, L"|<", L"Next / Prev move", keyFont, labelFont);
-        x += 206;
-        drawShortcut(dc, x, footer.top + 12, L">||", L"Play / Pause selects", keyFont, labelFont);
-        x += 206;
+        drawShortcut(dc, x, y, ShortcutGlyph::NavPair, L"", L"Move", keyFont, labelFont);
+        x += 132;
+        drawShortcut(dc, x, y, ShortcutGlyph::PlayPause, L"", L"Select", keyFont, labelFont);
+        x += 138;
     } else if (hasControlledTarget) {
-        drawShortcut(dc, x, footer.top + 12, L">||", L"Media keys now control this tab", keyFont, labelFont);
-        x += 240;
+        drawShortcut(dc, x, y, ShortcutGlyph::PlayPause, L"", L"Play/pause", keyFont, labelFont);
+        x += 156;
     }
-    drawShortcut(dc, x, footer.top + 12, L"Esc", L"Dismiss", keyFont, labelFont);
+    drawShortcut(dc, x, y, ShortcutGlyph::None, L"Esc", L"Dismiss", keyFont, labelFont);
 }
 
 void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont, HFONT bodyFont, HFONT metaFont, HFONT keyFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    fillRoundRect(dc, panel, 18, RGB(29, 31, 39), RGB(58, 61, 72));
+    fillRoundRect(dc, panel, 18, kPanel);
+    drawOverlayShell(dc, panel);
 
     RECT accent{panel.left + 16, panel.top + 17, panel.left + 19, panel.top + 31};
-    fillRoundRect(dc, accent, 2, state.targets.empty() ? RGB(81, 85, 98) : RGB(92, 142, 255));
+    fillRoundRect(dc, accent, 2, state.targets.empty() ? RGB(81, 85, 98) : kAccent);
 
     RECT headerTitle{panel.left + 30, panel.top + 8, panel.right - 100, panel.top + 42};
     drawTextLine(dc, L"Choose media target", headerTitle, titleFont, RGB(244, 246, 250));
@@ -397,12 +785,16 @@ void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, H
     for (const MediaTarget& target : state.targets) {
         if (target.kind == L"browser") ++browserCount;
     }
-    const std::wstring count = std::to_wstring(state.targets.size())
-        + (browserCount == state.targets.size() ? L" tabs" : L" targets");
+    const size_t total = state.targets.size();
+    const bool allBrowser = (browserCount == total);
+    const std::wstring count = std::to_wstring(total)
+        + (allBrowser
+            ? (total == 1 ? L" tab"    : L" tabs")
+            : (total == 1 ? L" target" : L" targets"));
     RECT countRect{panel.right - 92, panel.top + 8, panel.right - 18, panel.top + 42};
     drawTextLine(dc, count, countRect, metaFont, RGB(146, 150, 162), DT_RIGHT);
 
-    RECT footer{panel.left, panel.bottom - 48, panel.right, panel.bottom};
+    RECT footer{panel.left + 2, panel.bottom - 48, panel.right - 2, panel.bottom - 2};
     RECT content{panel.left + 8, panel.top + 54, panel.right - 8, footer.top};
 
     if (state.targets.empty()) {
@@ -416,7 +808,8 @@ void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, H
     }
 
     const int rowHeight = 76;
-    const size_t visibleRows = (std::min)(state.targets.size(), static_cast<size_t>((content.bottom - content.top) / rowHeight));
+    const int availableRows = (std::max)(1, static_cast<int>((content.bottom - content.top + rowHeight - 1) / rowHeight));
+    const size_t visibleRows = (std::min)(state.targets.size(), static_cast<size_t>(availableRows));
     const size_t first = firstVisibleIndex(state.targets.size(), state.selected, visibleRows);
 
     for (size_t rowIndex = 0; rowIndex < visibleRows; ++rowIndex) {
@@ -431,54 +824,36 @@ void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, H
 
 void paintConfirmationOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont, HFONT bodyFont, HFONT metaFont, HFONT keyFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    fillRoundRect(dc, panel, 18, RGB(29, 31, 39), RGB(92, 142, 255));
+    fillRoundRect(dc, panel, 18, kPanel);
+    drawOverlayShell(dc, panel);
 
-    RECT banner{panel.left, panel.top, panel.right, panel.top + 48};
-    fillRoundRect(dc, banner, 16, RGB(42, 55, 82), RGB(92, 142, 255));
+    RECT banner{panel.left + 2, panel.top + 2, panel.right - 2, panel.top + 48};
+    fillRoundRect(dc, banner, 16, RGB(42, 55, 82));
+
+    // Accent check circle with a centered white tick (antialiased).
     RECT check{banner.left + 18, banner.top + 15, banner.left + 36, banner.top + 33};
-    HBRUSH checkBrush = CreateSolidBrush(RGB(92, 142, 255));
-    HPEN noPen = static_cast<HPEN>(GetStockObject(NULL_PEN));
-    HGDIOBJ oldBrush = SelectObject(dc, checkBrush);
-    HGDIOBJ oldPen = SelectObject(dc, noPen);
-    Ellipse(dc, check.left, check.top, check.right, check.bottom);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(checkBrush);
-    RECT bannerText{banner.left + 46, banner.top + 8, banner.right - 16, banner.bottom};
+    drawCheckBadge(dc, check, kAccent, RGB(240, 245, 255));
+
+    RECT bannerText{banner.left + 46, banner.top, banner.right - 16, banner.bottom};
     drawTextLine(dc, L"NOW CONTROLLING", bannerText, metaFont, RGB(166, 194, 255));
 
     if (!state.targets.empty()) {
-        RECT row{panel.left + 16, panel.top + 66, panel.right - 16, panel.top + 142};
+        RECT row{panel.left + 18, panel.top + 62, panel.right - 18, panel.top + 154};
         drawMediaRow(dc, row, state.targets[0], false, titleFont, bodyFont, metaFont);
     }
 
-    RECT footer{panel.left, panel.bottom - 48, panel.right, panel.bottom};
+    RECT footer{panel.left + 2, panel.bottom - 48, panel.right - 2, panel.bottom - 2};
     drawFooter(dc, footer, false, true, keyFont, metaFont);
-
-    RECT dismissBar{panel.left + 1, panel.bottom - 3, panel.right - 1, panel.bottom - 1};
-    fillRectColor(dc, dismissBar, RGB(92, 142, 255));
 }
 
 void paintMessageOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    fillRoundRect(dc, panel, 18, RGB(29, 31, 39), RGB(70, 82, 112));
+    // Accent-tinted border matches the confirmation overlay vocabulary.
+    fillRoundRect(dc, panel, 18, kPanel);
 
+    // Accent check circle with a centered white tick (antialiased).
     RECT dot{18, 24, 38, 44};
-    HBRUSH dotBrush = CreateSolidBrush(RGB(92, 142, 255));
-    HGDIOBJ oldBrush = SelectObject(dc, dotBrush);
-    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
-    Ellipse(dc, dot.left, dot.top, dot.right, dot.bottom);
-    SelectObject(dc, oldPen);
-    SelectObject(dc, oldBrush);
-    DeleteObject(dotBrush);
-
-    HPEN checkPen = CreatePen(PS_SOLID, 2, RGB(12, 15, 22));
-    HGDIOBJ oldCheckPen = SelectObject(dc, checkPen);
-    MoveToEx(dc, 23, 34, nullptr);
-    LineTo(dc, 27, 38);
-    LineTo(dc, 34, 29);
-    SelectObject(dc, oldCheckPen);
-    DeleteObject(checkPen);
+    drawCheckBadge(dc, dot, kAccent, RGB(240, 245, 255));
 
     RECT textRect{50, 13, panel.right - 18, panel.bottom - 12};
     drawTextLine(dc, state.message, textRect, titleFont, RGB(240, 242, 248));
@@ -609,6 +984,7 @@ LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
 
 void overlayThreadMain() {
     g_overlayThreadId = GetCurrentThreadId();
+    ensureGdiplus();
 
     WNDCLASSW wc{};
     wc.lpfnWndProc = overlayWndProc;
@@ -629,7 +1005,7 @@ void overlayThreadMain() {
         nullptr, nullptr, wc.hInstance, nullptr);
 
     if (g_overlayWindow) {
-        SetLayeredWindowAttributes(g_overlayWindow, 0, 235, LWA_ALPHA);
+        SetLayeredWindowAttributes(g_overlayWindow, 0, 255, LWA_ALPHA);
     }
 
     if (g_overlayReady) SetEvent(g_overlayReady);
@@ -728,6 +1104,9 @@ std::vector<MediaTarget> queryWindowsMediaTargets(std::wstring* report) {
             } catch (...) {
                 target.playbackStatus = L"unknown";
             }
+
+            // Fetch album/thumbnail artwork from SMTC (best-effort).
+            fetchSmtcThumbnail(session, target);
 
             targets.push_back(std::move(target));
         }
@@ -863,6 +1242,7 @@ std::vector<MediaTarget> listMediaTargets(std::wstring* report) {
     replaceBrowserAppSessionsWhenTabsExist(targets, browserTargets, &hiddenBrowserAppSessions);
 
     targets.insert(targets.end(), browserTargets.begin(), browserTargets.end());
+    hydrateBrowserArtwork(targets);
     std::stable_sort(targets.begin(), targets.end(), [](const MediaTarget& left, const MediaTarget& right) {
         if (left.playing != right.playing) return left.playing;
         if (left.kind != right.kind) return left.kind < right.kind;
@@ -891,6 +1271,7 @@ std::vector<MediaTarget> listMediaTargetsLive(std::wstring* report) {
     replaceBrowserAppSessionsWhenTabsExist(targets, browserTargets, &hiddenBrowserAppSessions);
 
     targets.insert(targets.end(), browserTargets.begin(), browserTargets.end());
+    hydrateBrowserArtwork(targets);
     std::stable_sort(targets.begin(), targets.end(), [](const MediaTarget& left, const MediaTarget& right) {
         if (left.playing != right.playing) return left.playing;
         if (left.kind != right.kind) return left.kind < right.kind;

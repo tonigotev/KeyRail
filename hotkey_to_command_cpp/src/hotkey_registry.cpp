@@ -1,15 +1,47 @@
 #include "hotkey_registry.h"
 
 #include "action_factory.h"
+#include "audio.h"
+#include "clipboard_history.h"
 #include "hotkey.h"
+#include "media_sessions.h"
 #include "synthetic_hotkey_suppression.h"
 
 #include <windows.h>
 #include <cstdio>
 #include <sstream>
 #include <exception>
+#include <initializer_list>
 #include <thread>
 #include <unordered_set>
+
+static HotkeyRegistry* g_keyboardHookRegistry = nullptr;
+static const wchar_t* kPushToTalkOverlayClass = L"HotkeyToCommandPushToTalkOverlay";
+
+static LRESULT CALLBACK keyboardHookProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION && g_keyboardHookRegistry && lParam) {
+        const auto* event = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+        if (g_keyboardHookRegistry->handleKeyboardEvent(wParam, *event)) {
+            return 1;
+        }
+    }
+    return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+static LRESULT CALLBACK pushToTalkOverlayProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
+    if (message == WM_NCCREATE) {
+        auto* create = reinterpret_cast<CREATESTRUCTW*>(lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(create->lpCreateParams));
+    }
+
+    auto* registry = reinterpret_cast<HotkeyRegistry*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (message == WM_PAINT && registry) {
+        registry->paintPushToTalkOverlay();
+        return 0;
+    }
+
+    return DefWindowProcW(hwnd, message, wParam, lParam);
+}
 
 HotkeyRegistry::~HotkeyRegistry() {
     clear();
@@ -23,6 +55,8 @@ void HotkeyRegistry::clearRegisteredIds(std::vector<int>& ids) {
 }
 
 void HotkeyRegistry::clear() {
+    uninstallKeyboardHook(true);
+
     if (commandTimerId_ != 0) {
         KillTimer(nullptr, commandTimerId_);
         commandTimerId_ = 0;
@@ -36,6 +70,8 @@ void HotkeyRegistry::clear() {
     hotkeyLabels_.clear();
     hotkeyPretty_.clear();
     preparedBindings_.clear();
+    pushToTalkBindings_.clear();
+    pushToTalkOverlayEnabled_ = false;
     commandMode_ = false;
     commandActive_ = false;
     commandActivationId_ = 0;
@@ -51,6 +87,7 @@ static bool buildPreparedBindings(
     const AppConfig& config,
     std::vector<std::unique_ptr<Runnable>>& actions,
     std::vector<HotkeyRegistry::PreparedBinding>& prepared,
+    std::vector<HotkeyRegistry::PushToTalkBinding>& pushToTalk,
     std::wstringstream& status) {
     bool any = false;
     std::unordered_set<unsigned long long> seenHotkeys;
@@ -71,6 +108,16 @@ static bool buildPreparedBindings(
 
         if (!seenHotkeys.insert(combo.key()).second) {
             status << L"skip " << label << L": duplicate hotkey\n";
+            continue;
+        }
+
+        if (binding.action.type == L"builtin"
+            && (binding.action.name == L"push_to_talk" || binding.action.name == L"push_to_mute")) {
+            const bool muteWhileHeld = binding.action.name == L"push_to_mute";
+            pushToTalk.push_back({combo, label, false, binding.action.pushToTalkOverlay, muteWhileHeld});
+            status << (muteWhileHeld ? L"push-to-mute " : L"push-to-talk ")
+                   << combo.pretty << L" -> " << label << L"\n";
+            any = true;
             continue;
         }
 
@@ -98,8 +145,40 @@ std::wstring HotkeyRegistry::apply(const AppConfig& config) {
     commandMode_ = config.settings.hotkeyMode == L"command";
     commandTimeoutMs_ = clampTimeout(config.settings.commandTimeoutMs);
 
-    if (!buildPreparedBindings(config, actions_, preparedBindings_, status)) {
+    if (!buildPreparedBindings(config, actions_, preparedBindings_, pushToTalkBindings_, status)) {
         status << L"no bindings ready\n";
+    }
+
+    if (!pushToTalkBindings_.empty()) {
+        pushToTalkIdleMuted_ = true;
+        for (const auto& binding : pushToTalkBindings_) {
+            pushToTalkOverlayEnabled_ = pushToTalkOverlayEnabled_ || binding.showOverlay;
+            if (binding.muteWhileHeld) pushToTalkIdleMuted_ = false;
+        }
+        if (getDefaultMicrophoneMute(&pushToTalkPreviousMute_)) {
+            pushToTalkHadPreviousMute_ = true;
+        }
+        if (installKeyboardHook()) {
+            if (pushToTalkOverlayEnabled_ && !ensurePushToTalkOverlay()) {
+                status << L"push-to-talk overlay disabled: window failed\n";
+            }
+            setPushToTalkMute(pushToTalkIdleMuted_, L"held mic mode idle");
+            status << L"held mic bindings armed: " << pushToTalkBindings_.size() << L"\n";
+        } else {
+            status << L"held mic mode disabled: keyboard hook failed\n";
+            pushToTalkBindings_.clear();
+        }
+    }
+
+    // The low-level keyboard hook also lets Escape dismiss the media picker and
+    // clipboard history picker without a dedicated binding. Ensure it is armed
+    // even when there are no push-to-talk bindings.
+    if (!keyboardHook_) {
+        if (installKeyboardHook()) {
+            status << L"esc-dismiss hook armed\n";
+        } else {
+            status << L"esc-dismiss hook unavailable\n";
+        }
     }
 
     int nextId = 1;
@@ -247,6 +326,246 @@ void HotkeyRegistry::deactivateCommandMode() {
         }
     }
     commandActive_ = false;
+}
+
+bool HotkeyRegistry::installKeyboardHook() {
+    if (keyboardHook_) return true;
+    g_keyboardHookRegistry = this;
+    keyboardHook_ = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHookProc, nullptr, 0);
+    if (!keyboardHook_) {
+        if (g_keyboardHookRegistry == this) g_keyboardHookRegistry = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void HotkeyRegistry::uninstallKeyboardHook(bool restorePreviousMute) {
+    bool hadActivePushToTalk = false;
+    for (const auto& binding : pushToTalkBindings_) {
+        if (binding.active) {
+            hadActivePushToTalk = true;
+            break;
+        }
+    }
+
+    if (!pushToTalkBindings_.empty() || pushToTalkMuted_) {
+        if (hadActivePushToTalk) {
+            setPushToTalkMute(true, L"push-to-talk cleared while active");
+        } else if (restorePreviousMute && pushToTalkHadPreviousMute_) {
+            setPushToTalkMute(pushToTalkPreviousMute_, L"push-to-talk restored previous mute state");
+        }
+    }
+
+    if (keyboardHook_) {
+        UnhookWindowsHookEx(keyboardHook_);
+        keyboardHook_ = nullptr;
+    }
+    if (g_keyboardHookRegistry == this) g_keyboardHookRegistry = nullptr;
+    pushToTalkPreviousMute_ = false;
+    pushToTalkHadPreviousMute_ = false;
+    pushToTalkMuted_ = false;
+    pushToTalkIdleMuted_ = true;
+    pushToTalkOverlayEnabled_ = false;
+    destroyPushToTalkOverlay();
+}
+
+static bool anyVkDown(std::initializer_list<int> keys) {
+    for (int key : keys) {
+        if ((GetAsyncKeyState(key) & 0x8000) != 0) return true;
+    }
+    return false;
+}
+
+bool HotkeyRegistry::comboModifiersDown(UINT mods) const {
+    if ((mods & MOD_CONTROL) && !anyVkDown({VK_CONTROL, VK_LCONTROL, VK_RCONTROL})) return false;
+    if ((mods & MOD_ALT) && !anyVkDown({VK_MENU, VK_LMENU, VK_RMENU})) return false;
+    if ((mods & MOD_SHIFT) && !anyVkDown({VK_SHIFT, VK_LSHIFT, VK_RSHIFT})) return false;
+    if ((mods & MOD_WIN) && !anyVkDown({VK_LWIN, VK_RWIN})) return false;
+    return true;
+}
+
+void HotkeyRegistry::setPushToTalkMute(bool muted, const std::wstring& reason) {
+    std::wstring report;
+    if (setDefaultMicrophoneMute(muted, &report)) {
+        pushToTalkMuted_ = muted;
+        updatePushToTalkOverlay(muted);
+        wprintf(L"%s: %s\n", reason.c_str(), report.c_str());
+    } else {
+        wprintf(L"%s failed: %s\n", reason.c_str(), report.c_str());
+    }
+}
+
+bool HotkeyRegistry::ensurePushToTalkOverlay() {
+    if (pushToTalkOverlayWindow_) {
+        updatePushToTalkOverlay(pushToTalkMuted_);
+        return true;
+    }
+
+    HINSTANCE instance = GetModuleHandleW(nullptr);
+    WNDCLASSW wc{};
+    wc.lpfnWndProc = pushToTalkOverlayProc;
+    wc.hInstance = instance;
+    wc.lpszClassName = kPushToTalkOverlayClass;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+
+    if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return false;
+    }
+
+    RECT work{};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+        work = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    }
+
+    const int width = 22;
+    const int height = 22;
+    const int x = work.right - width - 18;
+    const int y = work.bottom - height - 18;
+
+    pushToTalkOverlayWindow_ = CreateWindowExW(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        kPushToTalkOverlayClass,
+        L"",
+        WS_POPUP,
+        x,
+        y,
+        width,
+        height,
+        nullptr,
+        nullptr,
+        instance,
+        this);
+
+    if (!pushToTalkOverlayWindow_) return false;
+
+    SetLayeredWindowAttributes(pushToTalkOverlayWindow_, RGB(255, 0, 255), 255, LWA_COLORKEY | LWA_ALPHA);
+    ShowWindow(pushToTalkOverlayWindow_, SW_SHOWNOACTIVATE);
+    UpdateWindow(pushToTalkOverlayWindow_);
+    return true;
+}
+
+void HotkeyRegistry::destroyPushToTalkOverlay() {
+    if (!pushToTalkOverlayWindow_) return;
+    DestroyWindow(pushToTalkOverlayWindow_);
+    pushToTalkOverlayWindow_ = nullptr;
+}
+
+void HotkeyRegistry::updatePushToTalkOverlay(bool muted) {
+    (void)muted;
+    if (!pushToTalkOverlayWindow_) return;
+    InvalidateRect(pushToTalkOverlayWindow_, nullptr, TRUE);
+    UpdateWindow(pushToTalkOverlayWindow_);
+}
+
+void HotkeyRegistry::paintPushToTalkOverlay() {
+    if (!pushToTalkOverlayWindow_) return;
+
+    PAINTSTRUCT ps;
+    HDC hdc = BeginPaint(pushToTalkOverlayWindow_, &ps);
+    RECT rect{};
+    GetClientRect(pushToTalkOverlayWindow_, &rect);
+
+    HBRUSH transparentBrush = CreateSolidBrush(RGB(255, 0, 255));
+    FillRect(hdc, &rect, transparentBrush);
+    DeleteObject(transparentBrush);
+
+    const bool muted = pushToTalkMuted_;
+    const COLORREF accent = muted ? RGB(222, 72, 84) : RGB(35, 210, 189);
+    HBRUSH glowBrush = CreateSolidBrush(muted ? RGB(122, 38, 47) : RGB(20, 101, 94));
+    HBRUSH oldGlowBrush = static_cast<HBRUSH>(SelectObject(hdc, glowBrush));
+    HPEN glowPen = CreatePen(PS_SOLID, 1, muted ? RGB(122, 38, 47) : RGB(20, 101, 94));
+    HPEN oldGlowPen = static_cast<HPEN>(SelectObject(hdc, glowPen));
+    Ellipse(hdc, 1, 1, rect.right - 1, rect.bottom - 1);
+    SelectObject(hdc, oldGlowPen);
+    DeleteObject(glowPen);
+    SelectObject(hdc, oldGlowBrush);
+    DeleteObject(glowBrush);
+
+    HBRUSH dotBrush = CreateSolidBrush(accent);
+    HBRUSH oldBrush = static_cast<HBRUSH>(SelectObject(hdc, dotBrush));
+    HPEN dotPen = CreatePen(PS_SOLID, 1, accent);
+    HPEN oldPen = static_cast<HPEN>(SelectObject(hdc, dotPen));
+    Ellipse(hdc, 5, 5, rect.right - 5, rect.bottom - 5);
+    SelectObject(hdc, oldPen);
+    DeleteObject(dotPen);
+    SelectObject(hdc, oldBrush);
+    DeleteObject(dotBrush);
+
+    EndPaint(pushToTalkOverlayWindow_, &ps);
+}
+
+bool HotkeyRegistry::handleKeyboardEvent(WPARAM message, const KBDLLHOOKSTRUCT& event) {
+    // Escape dismisses an open media picker or clipboard history picker. These
+    // overlays are non-activating, so we catch Esc here and swallow it so it does
+    // not also reach whatever app is focused underneath.
+    if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
+        && event.vkCode == VK_ESCAPE
+        && (event.flags & LLKHF_INJECTED) == 0) {
+        if (mediaPickerIsOpen()) {
+            cancelMediaPicker(nullptr);
+            return true;
+        }
+        if (clipboardHistoryPickerIsOpen()) {
+            cancelClipboardHistoryPicker(nullptr);
+            return true;
+        }
+    }
+
+    if (pushToTalkBindings_.empty()) return false;
+    if ((event.flags & LLKHF_INJECTED) != 0) return false;
+
+    const bool down = message == WM_KEYDOWN || message == WM_SYSKEYDOWN;
+    const bool up = message == WM_KEYUP || message == WM_SYSKEYUP;
+    if (!down && !up) return false;
+
+    bool swallow = false;
+    bool anyActive = false;
+    bool activeMuted = pushToTalkIdleMuted_;
+    bool changedActiveState = false;
+
+    for (auto& binding : pushToTalkBindings_) {
+        if (event.vkCode != binding.combo.vk) {
+            if (binding.active) {
+                anyActive = true;
+                activeMuted = binding.muteWhileHeld;
+            }
+            continue;
+        }
+
+        if (down && comboModifiersDown(binding.combo.mods)) {
+            swallow = true;
+            if (!binding.active) {
+                binding.active = true;
+                changedActiveState = true;
+                std::lock_guard<std::mutex> lock(eventMutex_);
+                ++eventCounter_;
+                lastEvent_ = L"last hotkey: " + binding.combo.pretty + L" -> " + binding.label
+                    + L" pressed #" + std::to_wstring(eventCounter_);
+            }
+        } else if (up && binding.active) {
+            swallow = true;
+            binding.active = false;
+            changedActiveState = true;
+            std::lock_guard<std::mutex> lock(eventMutex_);
+            ++eventCounter_;
+            lastEvent_ = L"last hotkey: " + binding.combo.pretty + L" -> " + binding.label
+                + L" released #" + std::to_wstring(eventCounter_);
+        }
+
+        if (binding.active) {
+            anyActive = true;
+            activeMuted = binding.muteWhileHeld;
+        }
+    }
+
+    if (changedActiveState) {
+        const bool targetMuted = anyActive ? activeMuted : pushToTalkIdleMuted_;
+        if (targetMuted != pushToTalkMuted_) {
+            setPushToTalkMute(targetMuted, anyActive ? L"held mic key pressed" : L"held mic key released");
+        }
+    }
+
+    return swallow;
 }
 
 bool HotkeyRegistry::handleTimer(WPARAM timerId) {

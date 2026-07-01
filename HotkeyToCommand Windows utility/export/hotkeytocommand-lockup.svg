@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="560" height="150" viewBox="0 0 560 150">
+<rect width="560" height="150" fill="none"></rect>
+<g transform="translate(11,11) scale(1)">
+<rect x="6" y="6" width="116" height="116" rx="30" fill="#006da6"></rect>
+<rect x="30" y="30" width="30" height="30" rx="7" fill="#ffffff"></rect>
+<rect x="68" y="30" width="30" height="30" rx="7" fill="#ffffff"></rect>
+<rect x="30" y="68" width="30" height="30" rx="7" fill="#ffffff"></rect>
+<path d="M74 72 L92 84 L74 96" fill="none" stroke="#78d0ff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"></path>
+</g>
+<text x="170" y="87" font-family="&#39;Space Grotesk&#39;,Segoe UI,sans-serif" font-size="40" letter-spacing="-0.5">
+<tspan font-weight="400" fill="#2b2f36">Hotkey</tspan><tspan font-weight="400" fill="#006da6"> → </tspan><tspan font-weight="700" fill="#2b2f36">Command</tspan></text>
+</svg>

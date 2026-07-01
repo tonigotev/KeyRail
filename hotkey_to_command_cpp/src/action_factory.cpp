@@ -2,6 +2,7 @@
 
 #include "app_audio.h"
 #include "audio.h"
+#include "clipboard_history.h"
 #include "discord_bridge.h"
 #include "media_sessions.h"
 
@@ -433,6 +434,66 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
                         std::wstring report = describeMediaTargets();
                         wprintf(L"\n%s\n", report.c_str());
                         MessageBoxW(nullptr, report.c_str(), L"Media Sessions", MB_OK | MB_SETFOREGROUND);
+                    }),
+                    L""};
+        }
+        if (spec.name == L"clipboard_history_open") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (openClipboardHistoryPicker(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"clipboard_history_next") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (moveClipboardHistoryPicker(1, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"clipboard_history_previous") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (moveClipboardHistoryPicker(-1, &report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"clipboard_history_confirm") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (confirmClipboardHistoryPicker(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
+        if (spec.name == L"clipboard_history_cancel") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        cancelClipboardHistoryPicker(&report);
+                        wprintf(L"  -> %s\n", report.c_str());
+                    }),
+                    L""};
+        }
+        if (spec.name == L"inspect_clipboard_history") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report = describeClipboardHistory();
+                        wprintf(L"\n%s\n", report.c_str());
+                        MessageBoxW(nullptr, report.c_str(), L"Clipboard History", MB_OK | MB_SETFOREGROUND);
                     }),
                     L""};
         }

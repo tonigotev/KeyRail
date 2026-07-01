@@ -111,15 +111,6 @@ std::wstring defaultConfigText() {
         "type": "builtin",
         "name": "media_play_pause_contextual"
       }
-    },
-    {
-      "id": "media-picker-cancel",
-      "enabled": true,
-      "hotkey": "media_stop",
-      "action": {
-        "type": "builtin",
-        "name": "media_picker_cancel"
-      }
     }
   ]
 }
@@ -165,6 +156,10 @@ static ActionSpec parseAction(const json& obj) {
     if (show != obj.end() && show->is_boolean()) action.showWindow = show->get<bool>();
     auto strongClose = obj.find("strong_close");
     if (strongClose != obj.end() && strongClose->is_boolean()) action.strongClose = strongClose->get<bool>();
+    auto pushToTalkOverlay = obj.find("ptt_overlay");
+    if (pushToTalkOverlay != obj.end() && pushToTalkOverlay->is_boolean()) {
+        action.pushToTalkOverlay = pushToTalkOverlay->get<bool>();
+    }
 
     auto args = obj.find("args");
     if (args != obj.end() && args->is_array()) {
@@ -184,6 +179,12 @@ static BindingSpec parseBinding(const json& obj) {
     auto action = obj.find("action");
     if (action != obj.end()) binding.action = parseAction(*action);
     return binding;
+}
+
+static bool isObsoleteCancelAction(const BindingSpec& binding) {
+    return binding.action.type == L"builtin"
+        && (binding.action.name == L"media_picker_cancel"
+            || binding.action.name == L"clipboard_history_cancel");
 }
 
 static AppSettings parseSettings(const json& obj) {
@@ -241,7 +242,11 @@ ConfigLoadResult loadConfig() {
         }
 
         for (const auto& item : *bindings) {
-            if (item.is_object()) config.bindings.push_back(parseBinding(item));
+            if (!item.is_object()) continue;
+            BindingSpec binding = parseBinding(item);
+            if (!isObsoleteCancelAction(binding)) {
+                config.bindings.push_back(std::move(binding));
+            }
         }
 
         result.ok = true;

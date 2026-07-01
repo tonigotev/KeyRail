@@ -1,6 +1,8 @@
 const WS_URL = "ws://127.0.0.1:8790/browser-media";
 const SCAN_TIMEOUT_MS = 900;
 const CONTROL_TIMEOUT_MS = 1500;
+const IMAGE_FETCH_TIMEOUT_MS = 900;
+const MAX_INLINE_IMAGE_BYTES = 700 * 1024;
 const HEARTBEAT_MS = 20000;
 const ALARM_NAME = "hotkey-to-command-media-keepalive";
 const SKIP_SCHEMES = /^(chrome|edge|brave|opera|vivaldi|about|chrome-extension|moz-extension|devtools|view-source|chrome-search|chrome-untrusted):/i;
@@ -14,6 +16,7 @@ let lastScanLog = [];
 let lastTargets = [];
 const youtubeWatchStacks = new Map();
 const youtubeProgrammaticPrevious = new Map();
+const imageDataUrlCache = new Map();
 
 function send(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -146,6 +149,36 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function imageAsDataUrl(url) {
+  if (!url || url.startsWith("data:")) return url || "";
+  if (!/^https?:\/\//i.test(url)) return "";
+  if (imageDataUrlCache.has(url)) return imageDataUrlCache.get(url);
+
+  try {
+    const response = await withTimeout(fetch(url, { credentials: "omit", cache: "force-cache" }), IMAGE_FETCH_TIMEOUT_MS, "image fetch");
+    if (!response.ok) throw new Error(`image fetch ${response.status}`);
+    const contentType = response.headers.get("content-type") || "image/png";
+    if (!contentType.startsWith("image/")) throw new Error(`not an image: ${contentType}`);
+    const buffer = await response.arrayBuffer();
+    if (buffer.byteLength > MAX_INLINE_IMAGE_BYTES) throw new Error("image too large");
+    const dataUrl = `data:${contentType};base64,${bytesToBase64(new Uint8Array(buffer))}`;
+    imageDataUrlCache.set(url, dataUrl);
+    return dataUrl;
+  } catch {
+    imageDataUrlCache.set(url, "");
+    return "";
+  }
+}
+
 async function collectTargets() {
   let tabs = [];
   const scanLog = [];
@@ -223,6 +256,8 @@ async function scanTab(tab) {
   }
 
   const media = best.media;
+  const artworkUrl = await imageAsDataUrl(media.artwork || "");
+  const favIconUrl = await imageAsDataUrl(tab.favIconUrl || "");
   return {
     log: `target: tab ${tab.id} frame ${best.frameId} ${safeHost(tab.url)} (${media.title || tab.title || ""})`,
     target: {
@@ -237,7 +272,8 @@ async function scanTab(tab) {
       artist: media.artist || "",
       album: media.album || "",
       url: tab.url || media.url || "",
-      favIconUrl: tab.favIconUrl || "",
+      favIconUrl,
+      artworkUrl,
       playing: Boolean(media.isPlaying),
       audible: Boolean(media.isPlaying),
       muted: false,
@@ -291,6 +327,9 @@ function scanFrameMedia() {
     const first = playingElement || usable[0] || null;
     const title = metadata?.title || document.title || null;
     const artist = metadata?.artist || null;
+    const artwork = Array.isArray(metadata?.artwork) && metadata.artwork.length
+      ? metadata.artwork[metadata.artwork.length - 1]?.src || ""
+      : "";
 
     return {
       hasMedia: true,
@@ -298,7 +337,7 @@ function scanFrameMedia() {
       mediaSessionTitle: metadata?.title || "",
       artist: artist || "",
       album: metadata?.album || "",
-      artwork: metadata?.artwork?.[0]?.src || "",
+      artwork,
       playbackState,
       isPlaying: Boolean(playingElement) || playbackState === "playing",
       canPlayPause: Boolean(first) || playbackState === "playing" || playbackState === "paused",

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -18,6 +19,7 @@ struct MediaTarget {
     std::wstring artist;
     std::wstring sourceHost;
     std::wstring favIconUrl;
+    std::wstring artworkUrl;
     std::wstring url;
     std::wstring documentTitle;
     std::wstring tabTitle;
@@ -27,6 +29,13 @@ struct MediaTarget {
     bool canTogglePlayPause = false;
     bool canNext = false;
     bool canPrevious = false;
+    // Pre-decoded artwork pixels (BGRA, top-down). Empty when unavailable.
+    std::vector<uint8_t> artworkBgra;
+    int artworkWidth = 0;
+    int artworkHeight = 0;
+    std::vector<uint8_t> favIconBgra;
+    int favIconWidth = 0;
+    int favIconHeight = 0;
 };
 
 std::vector<MediaTarget> listMediaTargets(std::wstring* report = nullptr);

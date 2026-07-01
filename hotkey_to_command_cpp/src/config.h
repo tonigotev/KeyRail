@@ -13,6 +13,7 @@ struct ActionSpec {
     std::vector<std::wstring> args;
     bool showWindow = false;
     bool strongClose = false;
+    bool pushToTalkOverlay = false;
 };
 
 struct BindingSpec {

@@ -2,9 +2,10 @@
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import appIconUrl from "./assets/hotkeytocommand-icon.svg";
 
   type ActionSpec =
-    | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "media_picker_open" | "media_picker_next" | "media_picker_previous" | "media_picker_confirm" | "media_picker_cancel" | "media_selected_play_pause" | "media_selected_next" | "media_selected_previous" | "media_next_contextual" | "media_previous_contextual" | "media_play_pause_contextual" | "inspect_media_sessions" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean }
+    | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "push_to_talk" | "push_to_mute" | "clipboard_history_open" | "clipboard_history_next" | "clipboard_history_previous" | "clipboard_history_confirm" | "clipboard_history_cancel" | "inspect_clipboard_history" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "media_picker_open" | "media_picker_next" | "media_picker_previous" | "media_picker_confirm" | "media_picker_cancel" | "media_selected_play_pause" | "media_selected_next" | "media_selected_previous" | "media_next_contextual" | "media_previous_contextual" | "media_play_pause_contextual" | "inspect_media_sessions" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean; ptt_overlay?: boolean }
     | { type: "open_app"; path: string; args: string[]; show_window: boolean }
     | { type: "run_script"; path: string; args: string[]; working_dir: string; interpreter: string; show_window: boolean }
     | { type: "run_command"; command: string; show_window: boolean };
@@ -51,6 +52,7 @@
   type DeleteTarget =
     | { type: "binding"; index: number; name: string }
     | { type: "media-group"; count: number }
+    | { type: "clipboard-group"; count: number }
     | { type: "preset"; name: string };
 
   type Toast = {
@@ -158,6 +160,9 @@
   let addSearchInput: HTMLInputElement | undefined;
   let highlightedBindingId = "";
   let recordingBindingId = "";
+  let deletingBindingIds = new Set<string>();
+  let deletingMediaGroup = false;
+  let deletingClipboardGroup = false;
   let highlightTimer: ReturnType<typeof setTimeout> | undefined;
   let pendingDelete: DeleteTarget | null = null;
   let mediaPickerIntroOpen = false;
@@ -194,8 +199,9 @@
   $: bindingRows = config.bindings.map((binding, index) => ({ binding, index }));
   $: visibleRows = bindingRows.filter(({ binding }) => bindingMatchesSearch(binding, searchQuery));
   $: visibleMediaRows = visibleRows.filter(({ binding }) => isMediaAction(binding.action));
-  $: visibleRegularRows = visibleRows.filter(({ binding }) => !isMediaAction(binding.action));
-  $: visibleCount = visibleRegularRows.length + visibleMediaRows.length;
+  $: visibleClipboardRows = visibleRows.filter(({ binding }) => isClipboardAction(binding.action));
+  $: visibleRegularRows = visibleRows.filter(({ binding }) => !isMediaAction(binding.action) && !isClipboardAction(binding.action));
+  $: visibleCount = visibleRegularRows.length + visibleMediaRows.length + visibleClipboardRows.length;
   $: onboardingSteps = buildOnboardingSteps();
   $: onboardingCurrent = onboardingSteps[Math.min(onboardingStep, Math.max(0, onboardingSteps.length - 1))] ?? "welcome";
   $: onboardingProgressLabel = `Step ${Math.min(onboardingStep + 1, onboardingSteps.length)} of ${onboardingSteps.length}`;
@@ -342,8 +348,13 @@
         ...defaultConfig.onboarding,
         ...(value.onboarding ?? {})
       },
-      bindings: value.bindings ?? []
+      bindings: (value.bindings ?? []).filter((binding) => !isObsoleteCancelAction(binding.action))
     };
+  }
+
+  function isObsoleteCancelAction(action: ActionSpec) {
+    return action.type === "builtin"
+      && (action.name === "media_picker_cancel" || action.name === "clipboard_history_cancel");
   }
 
   async function saveConfigOnly() {
@@ -439,17 +450,20 @@
   function deleteTitle(target: DeleteTarget) {
     if (target.type === "binding") return `Delete ${target.name}?`;
     if (target.type === "media-group") return "Delete Media picker controls?";
+    if (target.type === "clipboard-group") return "Delete Clipboard history controls?";
     return `Delete ${target.name}?`;
   }
 
   function deleteMessage(target: DeleteTarget) {
     if (target.type === "binding") return "This removes the binding from the current config. You can recreate it later, but the hotkey and action details will be gone.";
     if (target.type === "media-group") return `This deletes all ${target.count} bindings in this group.`;
+    if (target.type === "clipboard-group") return `This deletes all ${target.count} bindings in this group.`;
     return "This deletes the preset folder and its JSON file. If this is the active preset, the app will fall back to a clean main config.";
   }
 
   function deleteButtonText(target: DeleteTarget) {
     if (target.type === "media-group") return "Delete group";
+    if (target.type === "clipboard-group") return "Delete group";
     if (target.type === "preset") return "Delete preset";
     return "Delete binding";
   }
@@ -459,9 +473,11 @@
     const target = pendingDelete;
     pendingDelete = null;
     if (target.type === "binding") {
-      removeBinding(target.index);
+      await removeBinding(target.index);
     } else if (target.type === "media-group") {
-      removeMediaPickerGroup();
+      await removeMediaPickerGroup();
+    } else if (target.type === "clipboard-group") {
+      await removeClipboardHistoryGroup();
     } else {
       await deletePresetByName(target.name);
     }
@@ -832,19 +848,24 @@
       { id: "kill-focused-app", category: "WINDOW & SYSTEM", icon: "KILL", name: "Kill focused app", description: "Force-end the active app process.", actionType: "kill_focused_app" },
       { id: "cycle-audio-output", category: "AUDIO", icon: "OUT", name: "Cycle audio output", description: "Switch the default output device.", actionType: "cycle_audio_output" },
       { id: "cycle-microphone-input", category: "AUDIO", icon: "MIC", name: "Cycle microphone input", description: "Switch the default microphone.", actionType: "cycle_microphone_input" },
+      { id: "push-to-talk", category: "AUDIO", icon: "PTT", name: "Push to talk", description: "Keep the default microphone muted until this hotkey is held.", actionType: "push_to_talk" },
+      { id: "push-to-mute", category: "AUDIO", icon: "PTM", name: "Push to mute", description: "Keep the default microphone live, then mute while this hotkey is held.", actionType: "push_to_mute" },
       { id: "focused-app-output", category: "AUDIO", icon: "APP", name: "Focused app output", description: "Switch output for the app currently in focus.", actionType: "cycle_focused_app_audio_output" },
       { id: "focused-app-microphone", category: "AUDIO", icon: "MIC", name: "Focused app microphone", description: "Switch microphone for the app currently in focus.", actionType: "cycle_focused_app_microphone_input" },
+      { id: "clipboard-history", category: "CLIPBOARD", icon: "CLIP", name: "Clipboard history", description: "Open a fast local clipboard picker.", actionType: "clipboard_history_open" },
+      { id: "clipboard-history-controls", category: "PRESETS", icon: "CLIP", name: "Clipboard history controls", description: "Add open, next, previous, and confirm clipboard hotkeys. Esc closes the picker.", actionType: "clipboard_history_bundle", count: 4 },
       { id: "open-media-picker", category: "MEDIA", icon: "PICK", name: "Open media picker", description: "Choose a media target to control.", actionType: "media_picker_open" },
       { id: "media-next", category: "MEDIA", icon: "NEXT", name: "Media next / picker next", description: "Skip media or move the picker selection forward.", actionType: "media_next_contextual" },
       { id: "media-previous", category: "MEDIA", icon: "PREV", name: "Media previous / picker previous", description: "Go back or move the picker selection backward.", actionType: "media_previous_contextual" },
       { id: "media-play-pause", category: "MEDIA", icon: "PLAY", name: "Media play/pause / picker confirm", description: "Toggle playback or confirm the picker target.", actionType: "media_play_pause_contextual" },
-      { id: "media-picker-controls", category: "PRESETS", icon: "SET", name: "Media picker controls", description: "Add the full media picker hotkey group.", actionType: "media_picker_bundle", count: 5 },
+      { id: "media-picker-controls", category: "PRESETS", icon: "SET", name: "Media picker controls", description: "Add the media picker hotkey group. Esc closes the picker.", actionType: "media_picker_bundle", count: 4 },
     ];
 
     if (showAdvanced) {
       items.push(
         { id: "inspect-focused-app-audio", category: "ADVANCED", icon: "DBG", name: "Inspect focused app audio", description: "Show focused app audio sessions and devices.", actionType: "inspect_focused_app_audio", advanced: true },
         { id: "inspect-media-sessions", category: "ADVANCED", icon: "DBG", name: "Inspect media sessions", description: "Show raw media session targets.", actionType: "inspect_media_sessions", advanced: true },
+        { id: "inspect-clipboard-history", category: "ADVANCED", icon: "DBG", name: "Inspect clipboard history", description: "Show captured clipboard history details.", actionType: "inspect_clipboard_history", advanced: true },
         { id: "cycle-discord-output", category: "ADVANCED", icon: "DISC", name: "Cycle Discord output", description: "Use the Discord bridge output switcher.", actionType: "cycle_discord_output_device", advanced: true },
         { id: "cycle-discord-microphone", category: "ADVANCED", icon: "DISC", name: "Cycle Discord microphone", description: "Use the Discord bridge microphone switcher.", actionType: "cycle_discord_microphone_input", advanced: true },
         { id: "run-command", category: "ADVANCED", icon: "CMD", name: "Run command", description: "Run a raw shell command.", actionType: "run_command", advanced: true }
@@ -898,6 +919,14 @@
   function actionForType(type: string): ActionSpec {
     if (type === "cycle_audio_output") return { type: "builtin", name: "cycle_audio_output" };
     if (type === "cycle_microphone_input") return { type: "builtin", name: "cycle_microphone_input" };
+    if (type === "push_to_talk") return { type: "builtin", name: "push_to_talk", ptt_overlay: true };
+    if (type === "push_to_mute") return { type: "builtin", name: "push_to_mute", ptt_overlay: true };
+    if (type === "clipboard_history_open") return { type: "builtin", name: "clipboard_history_open" };
+    if (type === "clipboard_history_next") return { type: "builtin", name: "clipboard_history_next" };
+    if (type === "clipboard_history_previous") return { type: "builtin", name: "clipboard_history_previous" };
+    if (type === "clipboard_history_confirm") return { type: "builtin", name: "clipboard_history_confirm" };
+    if (type === "clipboard_history_cancel") return { type: "builtin", name: "clipboard_history_cancel" };
+    if (type === "inspect_clipboard_history") return { type: "builtin", name: "inspect_clipboard_history" };
     if (type === "inspect_focused_app_audio") return { type: "builtin", name: "inspect_focused_app_audio" };
     if (type === "cycle_focused_app_audio_output") return { type: "builtin", name: "cycle_focused_app_audio_output" };
     if (type === "cycle_focused_app_microphone_input") return { type: "builtin", name: "cycle_focused_app_microphone_input" };
@@ -923,6 +952,10 @@
     closeAddChooser();
     if (item.actionType === "media_picker_bundle") {
       await addMediaPickerBundle();
+      return;
+    }
+    if (item.actionType === "clipboard_history_bundle") {
+      await addClipboardHistoryBundle();
       return;
     }
 
@@ -955,11 +988,38 @@
     void openAddChooser();
   }
 
-  function removeMediaPickerGroup() {
+  function markDeleting(id: string) {
+    deletingBindingIds = new Set([...deletingBindingIds, id]);
+  }
+
+  function unmarkDeleting(id: string) {
+    const next = new Set(deletingBindingIds);
+    next.delete(id);
+    deletingBindingIds = next;
+  }
+
+  async function removeMediaPickerGroup() {
     const removed = config.bindings.filter((binding) => isMediaAction(binding.action)).length;
+    if (removed > 0) {
+      deletingMediaGroup = true;
+      await wait(430);
+    }
     config.bindings = config.bindings.filter((binding) => !isMediaAction(binding.action));
+    deletingMediaGroup = false;
     touch();
     logEvent(`removed media picker controls (${removed})`, "warn");
+  }
+
+  async function removeClipboardHistoryGroup() {
+    const removed = config.bindings.filter((binding) => isClipboardAction(binding.action)).length;
+    if (removed > 0) {
+      deletingClipboardGroup = true;
+      await wait(430);
+    }
+    config.bindings = config.bindings.filter((binding) => !isClipboardAction(binding.action));
+    deletingClipboardGroup = false;
+    touch();
+    logEvent(`removed clipboard history controls (${removed})`, "warn");
   }
 
   async function addMediaPickerBundle() {
@@ -991,6 +1051,34 @@
     maybeShowMediaPickerIntro();
   }
 
+  async function addClipboardHistoryBundle() {
+    const definitions = clipboardHistoryBundleDefinitions();
+    const existingActions = new Set(config.bindings.map((binding) => builtinName(binding.action)).filter(Boolean));
+    const added: BindingSpec[] = [];
+
+    for (const definition of definitions) {
+      if (existingActions.has(definition.name)) continue;
+      added.push({
+        id: uniqueBindingId(definition.id),
+        enabled: true,
+        hotkey: definition.hotkey,
+        action: { type: "builtin", name: definition.name as Extract<ActionSpec, { type: "builtin" }>["name"] }
+      });
+      existingActions.add(definition.name);
+    }
+
+    if (!added.length) {
+      pushToast("Clipboard history controls already exist.", "info");
+      return;
+    }
+
+    config.bindings = [...config.bindings, ...added];
+    touch();
+    pushToast(`Clipboard history controls created with ${added.length} hotkeys.`, "success");
+    logEvent("created clipboard history controls", "ok");
+    await focusNewBinding(added[0].id);
+  }
+
   function legacyAddBinding() {
     config.bindings = [
       ...config.bindings,
@@ -1005,9 +1093,12 @@
     logEvent("added binding");
   }
 
-  function removeBinding(index: number) {
+  async function removeBinding(index: number) {
     const removed = config.bindings[index]?.id || "binding";
+    markDeleting(removed);
+    await wait(430);
     config.bindings.splice(index, 1);
+    unmarkDeleting(removed);
     touch();
     logEvent(`removed ${removed}`);
   }
@@ -1032,8 +1123,16 @@
       { id: "media-picker", hotkey: "ctrl+alt+m", name: "media_picker_open" },
       { id: "media-next", hotkey: "media_next", name: "media_next_contextual" },
       { id: "media-previous", hotkey: "media_previous", name: "media_previous_contextual" },
-      { id: "media-play-pause", hotkey: "media_play_pause", name: "media_play_pause_contextual" },
-      { id: "media-picker-cancel", hotkey: "media_stop", name: "media_picker_cancel" }
+      { id: "media-play-pause", hotkey: "media_play_pause", name: "media_play_pause_contextual" }
+    ] as const;
+  }
+
+  function clipboardHistoryBundleDefinitions() {
+    return [
+      { id: "clipboard-history", hotkey: "ctrl+alt+v", name: "clipboard_history_open" },
+      { id: "clipboard-next", hotkey: "ctrl+alt+down", name: "clipboard_history_next" },
+      { id: "clipboard-previous", hotkey: "ctrl+alt+up", name: "clipboard_history_previous" },
+      { id: "clipboard-confirm", hotkey: "ctrl+alt+enter", name: "clipboard_history_confirm" }
     ] as const;
   }
 
@@ -1088,12 +1187,28 @@
     return action.type === "builtin" && !!mediaLabel(action);
   }
 
+  function clipboardLabel(action: ActionSpec) {
+    if (action.type !== "builtin") return "";
+    if (action.name === "clipboard_history_open") return "Open clipboard history";
+    if (action.name === "clipboard_history_next") return "Next item";
+    if (action.name === "clipboard_history_previous") return "Previous item";
+    if (action.name === "clipboard_history_confirm") return "Paste selected";
+    if (action.name === "clipboard_history_cancel") return "Cancel picker";
+    if (action.name === "inspect_clipboard_history") return "Inspect clipboard";
+    return "";
+  }
+
+  function isClipboardAction(action: ActionSpec) {
+    return action.type === "builtin" && !!clipboardLabel(action) && action.name !== "inspect_clipboard_history";
+  }
+
   function bindingSearchText(binding: BindingSpec) {
     return [
       binding.id,
       binding.hotkey,
       actionLabel(binding.action),
       mediaLabel(binding.action),
+      clipboardLabel(binding.action),
       actionMeta(binding)
     ].join(" ").toLowerCase();
   }
@@ -1109,8 +1224,20 @@
       createMediaPickerBundle(index);
       return;
     }
+    if (type === "clipboard_history_bundle") {
+      void addClipboardHistoryBundle();
+      return;
+    }
     if (type === "cycle_audio_output") binding.action = { type: "builtin", name: "cycle_audio_output" };
     if (type === "cycle_microphone_input") binding.action = { type: "builtin", name: "cycle_microphone_input" };
+    if (type === "push_to_talk") binding.action = { type: "builtin", name: "push_to_talk", ptt_overlay: true };
+    if (type === "push_to_mute") binding.action = { type: "builtin", name: "push_to_mute", ptt_overlay: true };
+    if (type === "clipboard_history_open") binding.action = { type: "builtin", name: "clipboard_history_open" };
+    if (type === "clipboard_history_next") binding.action = { type: "builtin", name: "clipboard_history_next" };
+    if (type === "clipboard_history_previous") binding.action = { type: "builtin", name: "clipboard_history_previous" };
+    if (type === "clipboard_history_confirm") binding.action = { type: "builtin", name: "clipboard_history_confirm" };
+    if (type === "clipboard_history_cancel") binding.action = { type: "builtin", name: "clipboard_history_cancel" };
+    if (type === "inspect_clipboard_history") binding.action = { type: "builtin", name: "inspect_clipboard_history" };
     if (type === "inspect_focused_app_audio") binding.action = { type: "builtin", name: "inspect_focused_app_audio" };
     if (type === "cycle_focused_app_audio_output") binding.action = { type: "builtin", name: "cycle_focused_app_audio_output" };
     if (type === "cycle_focused_app_microphone_input") binding.action = { type: "builtin", name: "cycle_focused_app_microphone_input" };
@@ -1256,6 +1383,14 @@
     if (action.type === "run_command") return "Run command";
     if (action.name === "cycle_audio_output") return "Cycle audio output";
     if (action.name === "cycle_microphone_input") return "Cycle microphone input";
+    if (action.name === "push_to_talk") return "Push to talk";
+    if (action.name === "push_to_mute") return "Push to mute";
+    if (action.name === "clipboard_history_open") return "Clipboard history";
+    if (action.name === "clipboard_history_next") return "Clipboard history next";
+    if (action.name === "clipboard_history_previous") return "Clipboard history previous";
+    if (action.name === "clipboard_history_confirm") return "Clipboard history confirm";
+    if (action.name === "clipboard_history_cancel") return "Clipboard history cancel";
+    if (action.name === "inspect_clipboard_history") return "Inspect clipboard history";
     if (action.name === "cycle_focused_app_audio_output") return "Focused app output";
     if (action.name === "cycle_focused_app_microphone_input") return "Focused app microphone";
     if (action.name === "inspect_focused_app_audio") return "Inspect focused app audio";
@@ -1422,7 +1557,7 @@
 <main data-theme={theme}>
   <header class="titlebar" role="presentation" data-tauri-drag-region on:pointerdown={startWindowDrag}>
     <div class="window-title" data-tauri-drag-region>
-      <span></span>
+      <img src={appIconUrl} alt="" data-tauri-drag-region />
       <p data-tauri-drag-region>Hotkey To Command</p>
     </div>
     <div class="window-controls">
@@ -1602,7 +1737,7 @@
 
       <div class="binding-list">
         {#if visibleMediaRows.length}
-          <article class:highlight={highlightedBindingId === "media-picker"} class="media-group" on:pointerenter={setCardHoverDirection}>
+          <article class:deleting={deletingMediaGroup} class:highlight={highlightedBindingId === "media-picker"} class="media-group" on:pointerenter={setCardHoverDirection}>
             <div class="media-group-head">
               <div>
                 <h3>Media picker controls</h3>
@@ -1617,7 +1752,7 @@
             <div class="media-control-list">
               {#each visibleMediaRows as { binding, index }}
                 {@const duplicate = duplicateOwner(binding)}
-                <div class:highlight={binding.id === highlightedBindingId} class:invalid={!!duplicate} class:disabled={!binding.enabled} class="media-control-row">
+                <div class:deleting={deletingBindingIds.has(binding.id)} class:highlight={binding.id === highlightedBindingId} class:invalid={!!duplicate} class:disabled={!binding.enabled} class="media-control-row">
                   <label class="switch" aria-label="Binding enabled">
                     <input type="checkbox" bind:checked={binding.enabled} on:change={touch} />
                     <span></span>
@@ -1668,6 +1803,73 @@
           </article>
         {/if}
 
+        {#if visibleClipboardRows.length}
+          <article class:deleting={deletingClipboardGroup} class:highlight={highlightedBindingId === "clipboard-history"} class="media-group" on:pointerenter={setCardHoverDirection}>
+            <div class="media-group-head">
+              <div>
+                <h3>Clipboard history controls</h3>
+                <p>{visibleClipboardRows.length} controls grouped to keep the binding list short.</p>
+              </div>
+              <div class="media-group-actions">
+                <span>{visibleClipboardRows.filter(({ binding }) => binding.enabled).length} on</span>
+                <button class="danger group-delete" disabled={!!busyAction} on:click={() => pendingDelete = { type: "clipboard-group", count: visibleClipboardRows.length }}>Delete</button>
+              </div>
+            </div>
+
+            <div class="media-control-list">
+              {#each visibleClipboardRows as { binding, index }}
+                {@const duplicate = duplicateOwner(binding)}
+                <div class:deleting={deletingBindingIds.has(binding.id)} class:highlight={binding.id === highlightedBindingId} class:invalid={!!duplicate} class:disabled={!binding.enabled} class="media-control-row">
+                  <label class="switch" aria-label="Binding enabled">
+                    <input type="checkbox" bind:checked={binding.enabled} on:change={touch} />
+                    <span></span>
+                  </label>
+
+                  <input class="id" bind:value={binding.id} on:input={touch} aria-label="Binding id" />
+
+                  <div class="hotkey-editor">
+                    {#if hotkeyParts(binding.hotkey).length}
+                      {#each hotkeyParts(binding.hotkey) as part, partIndex}
+                        <span class:bad={!!duplicate} class="key-chip">{part}</span>
+                        {#if partIndex < hotkeyParts(binding.hotkey).length - 1}
+                          <span class="plus">+</span>
+                        {/if}
+                      {/each}
+                    {:else}
+                      <span class="empty-hotkey">No hotkey</span>
+                    {/if}
+                    <button
+                      data-hotkey-id={binding.id}
+                      class:bad={!!duplicate}
+                      class:listening={recordingBindingId === binding.id}
+                      class="bind-button"
+                      type="button"
+                      on:click={() => startHotkeyCapture(binding)}
+                      on:keydown={(event) => recordingBindingId === binding.id && captureHotkey(event, binding)}
+                      on:blur={() => {
+                        if (recordingBindingId === binding.id) recordingBindingId = "";
+                      }}
+                    >
+                      {recordingBindingId === binding.id ? "Listening..." : "Bind"}
+                    </button>
+                  </div>
+
+                  <div class="media-control-action">
+                    <strong>{clipboardLabel(binding.action)}</strong>
+                    {#if duplicate}
+                      <span>Duplicate of {binding.hotkey} already bound to {duplicate}.</span>
+                    {:else}
+                      <span>{binding.enabled ? "armed" : "off"}</span>
+                    {/if}
+                  </div>
+
+                  <button class="danger square" disabled={!!busyAction} aria-label="Delete binding" title="Delete binding" on:click={() => pendingDelete = { type: "binding", index, name: binding.id || "binding" }}>Delete</button>
+                </div>
+              {/each}
+            </div>
+          </article>
+        {/if}
+
         {#if visibleCount === 0}
           <div class="empty-results">
             <strong>No bindings found</strong>
@@ -1677,7 +1879,7 @@
 
         {#each visibleRegularRows as { binding, index }}
           {@const duplicate = duplicateOwner(binding)}
-          <article class:highlight={binding.id === highlightedBindingId} class:disabled={!binding.enabled} class:invalid={!!duplicate} on:pointerenter={setCardHoverDirection}>
+          <article class:deleting={deletingBindingIds.has(binding.id)} class:highlight={binding.id === highlightedBindingId} class:disabled={!binding.enabled} class:invalid={!!duplicate} on:pointerenter={setCardHoverDirection}>
             <div class="binding-main">
               <div class="binding-left">
                 <label class="switch" aria-label="Binding enabled">
@@ -1721,14 +1923,22 @@
                   <option value="run_script">Run script</option>
                   <option value="cycle_audio_output">Cycle audio output</option>
                   <option value="cycle_microphone_input">Cycle microphone input</option>
+                  <option value="push_to_talk">Push to talk</option>
+                  <option value="push_to_mute">Push to mute</option>
+                  <option value="clipboard_history_open">Clipboard history</option>
                   <option value="cycle_focused_app_audio_output">Focused app output</option>
                   <option value="cycle_focused_app_microphone_input">Focused app microphone</option>
                   <option value="media_picker_bundle">Media picker controls</option>
+                  <option value="clipboard_history_bundle">Clipboard history controls</option>
                   <option value="close_focused_app">Close focused app</option>
                   <option value="kill_focused_app">Kill focused app</option>
                   {#if advancedVisible}
                     <option value="inspect_focused_app_audio">Inspect focused app audio</option>
                     <option value="inspect_media_sessions">Inspect media sessions</option>
+                    <option value="inspect_clipboard_history">Inspect clipboard history</option>
+                    <option value="clipboard_history_next">Clipboard history next</option>
+                    <option value="clipboard_history_previous">Clipboard history previous</option>
+                    <option value="clipboard_history_confirm">Clipboard history confirm</option>
                     <option value="media_picker_open">Open media picker</option>
                     <option value="media_next_contextual">Media next / picker next</option>
                     <option value="media_previous_contextual">Media previous / picker previous</option>
@@ -1736,7 +1946,6 @@
                     <option value="media_picker_next">Picker next target</option>
                     <option value="media_picker_previous">Picker previous target</option>
                     <option value="media_picker_confirm">Picker confirm target</option>
-                    <option value="media_picker_cancel">Picker cancel</option>
                     <option value="media_selected_play_pause">Selected media play/pause</option>
                     <option value="media_selected_next">Selected media next</option>
                     <option value="media_selected_previous">Selected media previous</option>
@@ -1847,6 +2056,25 @@
             {:else if binding.action.type === "builtin" && binding.action.name === "kill_focused_app"}
               <div class="builtin builtin-kill">
                 Force-ends the focused app process. Unsaved work can be lost, and protected Windows processes are blocked.
+              </div>
+            {:else if binding.action.type === "builtin" && (binding.action.name === "push_to_talk" || binding.action.name === "push_to_mute")}
+              <div class="builtin builtin-ptt">
+                <span>
+                  {binding.action.name === "push_to_mute"
+                    ? "Keeps the default microphone live until this hotkey is held. Release the hotkey to unmute again."
+                    : "Keeps the default microphone muted until this hotkey is held. Release the hotkey to mute again."}
+                </span>
+                <label class="inline-check">
+                  <input
+                    type="checkbox"
+                    checked={binding.action.ptt_overlay ?? false}
+                    on:change={(event) => {
+                      binding.action.ptt_overlay = event.currentTarget.checked;
+                      touch();
+                    }}
+                  />
+                  <span>Show mic status overlay</span>
+                </label>
               </div>
             {:else}
               <div class="builtin">{actionLabel(binding.action)}</div>
