@@ -9,15 +9,6 @@
     "default_title": "Hotkey Media Bridge",
     "default_popup": "popup.html"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["ms-capture.js"],
-      "run_at": "document_start",
-      "all_frames": true,
-      "world": "MAIN"
-    }
-  ],
   "background": {
     "service_worker": "background.js"
   }

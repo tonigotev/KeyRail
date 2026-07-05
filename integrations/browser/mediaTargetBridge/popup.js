@@ -46,4 +46,13 @@ scanButton.addEventListener("click", async () => {
   statusEl.textContent += `\n\nmanual scan targets: ${targets.length}\n${JSON.stringify(targets, null, 2)}`;
 });
 
-void refresh();
+// Opening the popup should heal a dropped connection on its own, without needing
+// the user to click a tab or the Connect button first.
+(async () => {
+  try {
+    await send({ type: "force_connect" });
+  } catch {
+  }
+  await refresh();
+  setTimeout(refresh, 700);
+})();

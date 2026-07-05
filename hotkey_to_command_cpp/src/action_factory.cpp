@@ -448,6 +448,17 @@ ActionBuildResult makeAction(const ActionSpec& spec) {
                     }),
                     L""};
         }
+        if (spec.name == L"clipboard_quick_open") {
+            return {std::make_unique<BuiltinAction>([] {
+                        std::wstring report;
+                        if (openClipboardQuickPicker(&report)) {
+                            wprintf(L"  -> %s\n", report.c_str());
+                        } else {
+                            wprintf(L"  ! %s\n", report.c_str());
+                        }
+                    }),
+                    L""};
+        }
         if (spec.name == L"clipboard_history_next") {
             return {std::make_unique<BuiltinAction>([] {
                         std::wstring report;

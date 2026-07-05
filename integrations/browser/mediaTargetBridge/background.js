@@ -3,13 +3,17 @@ const SCAN_TIMEOUT_MS = 900;
 const CONTROL_TIMEOUT_MS = 1500;
 const IMAGE_FETCH_TIMEOUT_MS = 900;
 const MAX_INLINE_IMAGE_BYTES = 700 * 1024;
+const DEEP_CAPTURE_COOLDOWN_MS = 15000;
 const HEARTBEAT_MS = 20000;
 const ALARM_NAME = "hotkey-to-command-media-keepalive";
 const SKIP_SCHEMES = /^(chrome|edge|brave|opera|vivaldi|about|chrome-extension|moz-extension|devtools|view-source|chrome-search|chrome-untrusted):/i;
 
 let socket;
+let socketOpenedAt;
+let socketStartedAt;
 let reconnectTimer;
 let heartbeatTimer;
+let publishTimer;
 let reconnectDelay = 1000;
 let nextLocalId = 1;
 let lastScanLog = [];
@@ -17,6 +21,29 @@ let lastTargets = [];
 const youtubeWatchStacks = new Map();
 const youtubeProgrammaticPrevious = new Map();
 const imageDataUrlCache = new Map();
+const deepCaptureDisabledUntil = new Map();
+let browserAppNameCache;
+
+async function browserAppName() {
+  if (browserAppNameCache) return browserAppNameCache;
+
+  try {
+    if (typeof navigator?.brave?.isBrave === "function" && await navigator.brave.isBrave()) {
+      browserAppNameCache = "Brave";
+      return browserAppNameCache;
+    }
+  } catch {
+  }
+
+  const ua = navigator.userAgent || "";
+  if (/\bEdg\//.test(ua)) browserAppNameCache = "Edge";
+  else if (/\bOPR\//.test(ua) || /\bOpera\//.test(ua)) browserAppNameCache = "Opera";
+  else if (/\bVivaldi\//.test(ua)) browserAppNameCache = "Vivaldi";
+  else if (/\bFirefox\//.test(ua)) browserAppNameCache = "Firefox";
+  else if (/\bChrome\//.test(ua) || /\bChromium\//.test(ua)) browserAppNameCache = "Chrome";
+  else browserAppNameCache = "Browser";
+  return browserAppNameCache;
+}
 
 function send(message) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return false;
@@ -40,21 +67,53 @@ function setConnectionState(connected) {
   }).catch(() => undefined);
 }
 
-function connect() {
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+function closeStaleSocket() {
+  if (!socket) return false;
+  const state = socket.readyState;
+  const now = Date.now();
+  const connectingTooLong = state === WebSocket.CONNECTING && socketStartedAt && now - socketStartedAt > 5000;
+  const closed = state === WebSocket.CLOSED || state === WebSocket.CLOSING;
+  if (!connectingTooLong && !closed) return false;
+
+  try {
+    socket.close();
+  } catch {
+  }
+  socket = undefined;
+  socketStartedAt = undefined;
+  socketOpenedAt = undefined;
+  return true;
+}
+
+function connect(options = {}) {
+  closeStaleSocket();
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    if (options.publish) void publishTargets();
+    return;
+  }
+  if (socket && socket.readyState === WebSocket.CONNECTING && !options.force) return;
+  if (socket && options.force) {
+    try {
+      socket.close();
+    } catch {
+    }
+    socket = undefined;
+  }
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = undefined;
   }
 
   try {
+    socketStartedAt = Date.now();
     socket = new WebSocket(WS_URL);
   } catch {
     scheduleReconnect();
     return;
   }
 
-  socket.addEventListener("open", () => {
+  socket.addEventListener("open", async () => {
+    socketOpenedAt = Date.now();
     reconnectDelay = 1000;
     setConnectionState(true);
     startHeartbeat();
@@ -63,7 +122,8 @@ function connect() {
       type: "hello",
       payload: {
         name: chrome.runtime.getManifest().name,
-        version: chrome.runtime.getManifest().version
+        version: chrome.runtime.getManifest().version,
+        app: await browserAppName()
       }
     });
     void publishTargets();
@@ -79,6 +139,8 @@ function connect() {
 function handleDisconnect() {
   stopHeartbeat();
   socket = undefined;
+  socketStartedAt = undefined;
+  socketOpenedAt = undefined;
   setConnectionState(false);
   scheduleReconnect();
 }
@@ -256,6 +318,7 @@ async function scanTab(tab) {
   }
 
   const media = best.media;
+  const app = await browserAppName();
   const artworkUrl = await imageAsDataUrl(media.artwork || "");
   const favIconUrl = await imageAsDataUrl(tab.favIconUrl || "");
   return {
@@ -266,7 +329,7 @@ async function scanTab(tab) {
       tabId: tab.id,
       frameId: best.frameId,
       mediaId: "main-world",
-      app: "Browser",
+      app,
       site: media.site || safeHost(tab.url),
       title: media.title || tab.title || safeHost(tab.url),
       artist: media.artist || "",
@@ -283,7 +346,7 @@ async function scanTab(tab) {
       mediaSessionPlaybackState: media.playbackState || "",
       mediaSessionTitle: media.mediaSessionTitle || "",
       mediaSessionArtist: media.artist || "",
-      mediaSessionActions: Array.isArray(media.mediaSessionActions) ? media.mediaSessionActions : [],
+      mediaSessionActions: [],
       currentTime: Number.isFinite(media.currentTime) ? media.currentTime : 0,
       duration: Number.isFinite(media.duration) ? media.duration : 0,
       canPlayPause: Boolean(media.canPlayPause),
@@ -312,15 +375,18 @@ function scoreMedia(media) {
 function scanFrameMedia() {
   try {
     const session = navigator.mediaSession;
-    const captured = window.__hotkeydMedia;
     const metadata = session?.metadata;
     const elements = Array.from(document.querySelectorAll("video, audio"));
     const usable = elements.filter((element) => {
-      return element.duration || element.currentTime > 0 || element.readyState > 0 || !element.paused;
+      // Only treat an element as a real target if it is actually engaged: currently
+      // playing, or paused after having been played (currentTime > 0). A merely
+      // loaded/preloaded element (readyState or duration set but never started) is
+      // NOT a media target — that is what made idle YouTube tabs get detected.
+      return (!element.paused && !element.ended) || element.currentTime > 0;
     });
     const playingElement = usable.find((element) => !element.paused && !element.ended);
     const playbackState = session?.playbackState || (playingElement ? "playing" : usable.length > 0 ? "paused" : "none");
-    const hasMedia = Boolean(playingElement) || usable.length > 0 || playbackState === "playing" || playbackState === "paused";
+    const hasMedia = usable.length > 0;
 
     if (!hasMedia) return { hasMedia: false };
 
@@ -349,9 +415,9 @@ function scanFrameMedia() {
       url: location.href,
       site: location.hostname,
       mediaSessionSupported: Boolean(session),
-      mediaSessionActions: captured?.list?.() || [],
-      canNext: Boolean(captured?.has?.("nexttrack")),
-      canPrevious: Boolean(captured?.has?.("previoustrack"))
+      mediaSessionActions: [],
+      canNext: false,
+      canPrevious: false
     };
   } catch (error) {
     return { hasMedia: false, error: String(error) };
@@ -430,6 +496,15 @@ function youtubeWatchInfo(rawUrl) {
     };
   } catch {
     return undefined;
+  }
+}
+
+async function isYoutubeWatchTab(tabId) {
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return Boolean(youtubeWatchInfo(tab.url || ""));
+  } catch {
+    return false;
   }
 }
 
@@ -523,6 +598,117 @@ async function youtubePreviousLastResort(tabId, primaryResult) {
   return fallback.ok ? fallback : (primaryResult || fallback);
 }
 
+async function runControlScript(tabId, frameId, action, allFrames = false) {
+  return await withTimeout(chrome.scripting.executeScript({
+    target: allFrames ? { tabId, allFrames: true } : { tabId, frameIds: [frameId] },
+    world: "MAIN",
+    func: controlFrameMedia,
+    args: [action]
+  }), CONTROL_TIMEOUT_MS, allFrames ? `control all frames ${tabId}` : `control tab ${tabId}`);
+}
+
+function deepCaptureKey(tabId, frameId) {
+  return `${tabId}:${frameId}`;
+}
+
+function mediaStartupState() {
+  try {
+    const host = location.hostname.toLowerCase();
+    const isYoutubeWatch = (host === "youtube.com" || host === "www.youtube.com")
+      && location.pathname === "/watch";
+    const media = Array.from(document.querySelectorAll("video, audio"));
+    const first = media.find((element) => !element.paused && !element.ended) || media[0] || null;
+    const duration = first && Number.isFinite(first.duration) ? first.duration : 0;
+    return {
+      isYoutubeWatch,
+      loadingZeroDuration: Boolean(isYoutubeWatch && first && duration <= 0 && first.readyState < 2),
+      hasMedia: Boolean(first),
+      readyState: first?.readyState ?? 0,
+      duration
+    };
+  } catch (error) {
+    return { error: String(error), isYoutubeWatch: false, loadingZeroDuration: false };
+  }
+}
+
+async function canInjectDeepCapture(tabId, frameId) {
+  const disabledUntil = deepCaptureDisabledUntil.get(deepCaptureKey(tabId, frameId)) || 0;
+  if (disabledUntil > Date.now()) {
+    return { ok: false, code: "DEEP_CAPTURE_COOLDOWN", message: "deep capture is cooling down for this tab" };
+  }
+
+  const stateResult = await withTimeout(chrome.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    world: "MAIN",
+    func: mediaStartupState
+  }), SCAN_TIMEOUT_MS, `media startup state ${tabId}`);
+
+  const state = Array.isArray(stateResult) ? stateResult[0]?.result : undefined;
+  if (state?.loadingZeroDuration) {
+    return {
+      ok: false,
+      code: "YOUTUBE_STILL_LOADING",
+      message: "deep capture skipped while YouTube is still loading at 0:00"
+    };
+  }
+
+  return { ok: true };
+}
+
+async function injectDeepCapture(tabId, frameId) {
+  const allowed = await canInjectDeepCapture(tabId, frameId);
+  if (!allowed.ok) return allowed;
+
+  try {
+    await withTimeout(chrome.scripting.executeScript({
+      target: { tabId, frameIds: [frameId] },
+      world: "MAIN",
+      files: ["ms-capture.js"]
+    }), CONTROL_TIMEOUT_MS, `deep capture inject ${tabId}`);
+    return { ok: true };
+  } catch (error) {
+    deepCaptureDisabledUntil.set(deepCaptureKey(tabId, frameId), Date.now() + DEEP_CAPTURE_COOLDOWN_MS);
+    return {
+      ok: false,
+      code: "DEEP_CAPTURE_INJECT_FAILED",
+      message: String(error.message || error)
+    };
+  }
+}
+
+async function tryDeepMediaSessionControl(tabId, frameId, action, primaryResult) {
+  if (action !== "next" && action !== "previous") return primaryResult;
+
+  const injected = await injectDeepCapture(tabId, frameId);
+  if (!injected.ok) {
+    return {
+      ...(primaryResult || {}),
+      ok: false,
+      deepCapture: injected
+    };
+  }
+
+  const deepResult = await runControlScript(tabId, frameId, action, false);
+  const first = Array.isArray(deepResult) ? deepResult[0]?.result : undefined;
+  if (first?.ok) {
+    return {
+      ...first,
+      via: first.via || "deep-capture",
+      deepCapture: { ok: true, armed: true }
+    };
+  }
+
+  return {
+    ...(primaryResult || first || { ok: false, code: "DEEP_CAPTURE_NO_HANDLER", message: "deep capture armed but no handler was available yet" }),
+    ok: false,
+    deepCapture: {
+      ok: true,
+      armed: true,
+      message: "deep capture armed for future media-session handler registrations"
+    }
+  };
+}
+
 async function controlTarget(targetId, command) {
   const parsed = parseTargetId(targetId);
   if (!parsed) return { ok: false, code: "BAD_TARGET_ID", message: "Invalid browser target id" };
@@ -530,29 +716,34 @@ async function controlTarget(targetId, command) {
   const action = command === "play_pause" ? "playpause" : command;
 
   try {
-    const selectedResult = await withTimeout(chrome.scripting.executeScript({
-      target: { tabId: parsed.tabId, frameIds: [parsed.frameId] },
-      world: "MAIN",
-      func: controlFrameMedia,
-      args: [action]
-    }), CONTROL_TIMEOUT_MS, `control tab ${parsed.tabId}`);
+    const selectedResult = await runControlScript(parsed.tabId, parsed.frameId, action, false);
 
     const first = Array.isArray(selectedResult) ? selectedResult[0]?.result : undefined;
     if (first?.ok || (action !== "next" && action !== "previous")) {
       return first || { ok: false, code: "NO_RESULT", message: "No control result" };
     }
 
-    const allFrameResult = await withTimeout(chrome.scripting.executeScript({
-      target: { tabId: parsed.tabId, allFrames: true },
-      world: "MAIN",
-      func: controlFrameMedia,
-      args: [action]
-    }), CONTROL_TIMEOUT_MS, `control all frames ${parsed.tabId}`);
-
+    const allFrameResult = await runControlScript(parsed.tabId, parsed.frameId, action, true);
     const hits = Array.isArray(allFrameResult) ? allFrameResult.map((item) => item.result).filter(Boolean) : [];
     const result = hits.find((item) => item.ok) || first || hits[0] || { ok: false, code: "NO_RESULT", message: "No control result" };
-    if (!result.ok && action === "previous") {
-      return await youtubePreviousLastResort(parsed.tabId, result);
+    if (!result.ok) {
+      if (action === "previous" && await isYoutubeWatchTab(parsed.tabId)) {
+        const youtubeHistoryResult = await youtubeSmartPrevious(parsed.tabId);
+        if (youtubeHistoryResult.ok) {
+          youtubeHistoryResult.primaryFailure = {
+            code: result.code,
+            reason: result.reason,
+            message: result.message,
+            via: result.via
+          };
+          return youtubeHistoryResult;
+        }
+      }
+
+      const deepResult = await tryDeepMediaSessionControl(parsed.tabId, parsed.frameId, action, result);
+      if (deepResult?.ok) return deepResult;
+      if (action !== "previous") return deepResult;
+      return await youtubePreviousLastResort(parsed.tabId, deepResult);
     }
     return result;
   } catch (error) {
@@ -816,7 +1007,13 @@ function controlFrameMedia(action) {
       const captured = window.__hotkeydMedia;
       if (captured?.has?.(handlerAction)) {
         const result = captured.invoke(handlerAction);
-        if (result?.ok) return { ok: true, message: `${action} handler invoked`, via: `handler:${handlerAction}` };
+        if (result?.ok) {
+          return {
+            ok: true,
+            message: `${action} handler invoked`,
+            via: `deep-capture:${handlerAction}`
+          };
+        }
       }
       return controlTrack(action);
     }
@@ -862,8 +1059,13 @@ async function publishTargets() {
 }
 
 function wakeAndPublish() {
-  connect();
-  if (socket?.readyState === WebSocket.OPEN) void publishTargets();
+  connect({ publish: true });
+  if (socket?.readyState !== WebSocket.OPEN) return;
+  if (publishTimer) clearTimeout(publishTimer);
+  publishTimer = setTimeout(() => {
+    publishTimer = undefined;
+    void publishTargets();
+  }, 650);
 }
 
 function handlePossibleYoutubeNavigation(tabId, url) {
@@ -880,6 +1082,8 @@ async function popupStatus() {
     "lastScanLog",
     "lastTargets",
     "reconnectDelay",
+    "socketOpenedAt",
+    "socketStartedAt",
     "socketState"
   ]);
   return {
@@ -890,12 +1094,12 @@ async function popupStatus() {
 }
 
 chrome.runtime.onStartup.addListener(connect);
-chrome.runtime.onInstalled.addListener(connect);
+chrome.runtime.onInstalled.addListener(() => connect({ force: true, publish: true }));
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "media_state_changed") return false;
 
   if (message?.type === "force_connect") {
-    wakeAndPublish();
+    connect({ force: true, publish: true });
     sendResponse({ ok: true });
     return false;
   }
@@ -926,6 +1130,12 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 });
 chrome.tabs.onActivated.addListener(wakeAndPublish);
 
+// Reconnect as soon as the browser window regains focus, so returning to the
+// browser heals a dropped connection without needing a tab switch.
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId !== chrome.windows.WINDOW_ID_NONE) wakeAndPublish();
+});
+
 chrome.webNavigation.onHistoryStateUpdated.addListener((details) => {
   if (details.frameId === 0) handlePossibleYoutubeNavigation(details.tabId, details.url);
 });
@@ -934,9 +1144,20 @@ chrome.webNavigation.onCommitted.addListener((details) => {
   if (details.frameId === 0) handlePossibleYoutubeNavigation(details.tabId, details.url);
 });
 
-chrome.alarms.create(ALARM_NAME, { periodInMinutes: 1 });
+chrome.alarms.create(ALARM_NAME, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === ALARM_NAME) wakeAndPublish();
+  if (alarm.name !== ALARM_NAME) return;
+  // Watchdog: every time the alarm wakes the service worker, drop any dead
+  // socket and force a fresh connection if we are not currently open. This makes
+  // the extension recover on its own after a daemon restart or SW suspension,
+  // without relying on the user interacting with a tab.
+  closeStaleSocket();
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    reconnectDelay = 1000;
+    connect({ force: true, publish: true });
+  } else {
+    wakeAndPublish();
+  }
 });
 
-connect();
+connect({ publish: true });

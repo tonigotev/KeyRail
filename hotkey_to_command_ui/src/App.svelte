@@ -5,7 +5,7 @@
   import appIconUrl from "./assets/hotkeytocommand-icon.svg";
 
   type ActionSpec =
-    | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "push_to_talk" | "push_to_mute" | "clipboard_history_open" | "clipboard_history_next" | "clipboard_history_previous" | "clipboard_history_confirm" | "clipboard_history_cancel" | "inspect_clipboard_history" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "media_picker_open" | "media_picker_next" | "media_picker_previous" | "media_picker_confirm" | "media_picker_cancel" | "media_selected_play_pause" | "media_selected_next" | "media_selected_previous" | "media_next_contextual" | "media_previous_contextual" | "media_play_pause_contextual" | "inspect_media_sessions" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean; ptt_overlay?: boolean }
+    | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "push_to_talk" | "push_to_mute" | "clipboard_history_open" | "clipboard_history_next" | "clipboard_history_previous" | "clipboard_history_confirm" | "clipboard_history_cancel" | "clipboard_quick_open" | "inspect_clipboard_history" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "media_picker_open" | "media_picker_next" | "media_picker_previous" | "media_picker_confirm" | "media_picker_cancel" | "media_selected_play_pause" | "media_selected_next" | "media_selected_previous" | "media_next_contextual" | "media_previous_contextual" | "media_play_pause_contextual" | "inspect_media_sessions" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean; ptt_overlay?: boolean }
     | { type: "open_app"; path: string; args: string[]; show_window: boolean }
     | { type: "run_script"; path: string; args: string[]; working_dir: string; interpreter: string; show_window: boolean }
     | { type: "run_command"; command: string; show_window: boolean };
@@ -85,6 +85,7 @@
 
   type StartupStatus = {
     enabled: boolean;
+    elevated_enabled: boolean;
     path: string | null;
     detail: string;
   };
@@ -178,6 +179,7 @@
   };
   let startupStatus: StartupStatus = {
     enabled: false,
+    elevated_enabled: false,
     path: null,
     detail: "Not checked yet."
   };
@@ -185,6 +187,7 @@
   $: duplicateHotkeys = findDuplicateHotkeys(config.bindings);
   $: canSave = duplicateHotkeys.size === 0 && config.bindings.every((b) => b.id.trim() && b.hotkey.trim());
   $: daemonView = parseDaemonStatus(daemonStatus);
+  $: daemonElevated = /daemon elevated:\s*yes/i.test(daemonStatus);
   $: displayedDaemonView = daemonStatusCheckingVisual
     ? { ...daemonView, state: "checking" as const, label: "Checking", detail: "Refreshing daemon status..." }
     : daemonView;
@@ -450,7 +453,7 @@
   function deleteTitle(target: DeleteTarget) {
     if (target.type === "binding") return `Delete ${target.name}?`;
     if (target.type === "media-group") return "Delete Media picker controls?";
-    if (target.type === "clipboard-group") return "Delete Clipboard history controls?";
+    if (target.type === "clipboard-group") return "Delete Hotkey picker controls?";
     return `Delete ${target.name}?`;
   }
 
@@ -641,6 +644,7 @@
     } catch (error) {
       startupStatus = {
         enabled: false,
+        elevated_enabled: false,
         path: null,
         detail: String(error)
       };
@@ -654,6 +658,24 @@
     });
   }
 
+  async function setDaemonElevatedStartup(enabled: boolean) {
+    await runWithFeedback("startup-admin", enabled ? "Daemon will start with Windows as administrator." : "Administrator startup disabled.", async () => {
+      startupStatus = await invoke<StartupStatus>("set_daemon_elevated_startup", { enabled });
+      logEvent(enabled ? "enabled elevated startup" : "disabled elevated startup", "info", startupStatus.detail);
+    });
+  }
+
+  async function restartDaemonAsAdmin() {
+    await runWithFeedback("restart-admin", "Requested administrator restart. Accept the Windows prompt.", async () => {
+      await invoke("restart_daemon_as_admin");
+      logEvent("requested administrator restart", "info");
+      // Give the elevated instance time to take over the pipe, then refresh.
+      await wait(1200);
+      await refreshStatus();
+      await refreshStartupStatus();
+    });
+  }
+
   async function enableStartupForOnboardingDefault() {
     if (startupStatus.enabled) return;
     try {
@@ -662,6 +684,7 @@
     } catch (error) {
       startupStatus = {
         enabled: false,
+        elevated_enabled: false,
         path: null,
         detail: `Startup could not be enabled automatically: ${error}`
       };
@@ -852,8 +875,8 @@
       { id: "push-to-mute", category: "AUDIO", icon: "PTM", name: "Push to mute", description: "Keep the default microphone live, then mute while this hotkey is held.", actionType: "push_to_mute" },
       { id: "focused-app-output", category: "AUDIO", icon: "APP", name: "Focused app output", description: "Switch output for the app currently in focus.", actionType: "cycle_focused_app_audio_output" },
       { id: "focused-app-microphone", category: "AUDIO", icon: "MIC", name: "Focused app microphone", description: "Switch microphone for the app currently in focus.", actionType: "cycle_focused_app_microphone_input" },
-      { id: "clipboard-history", category: "CLIPBOARD", icon: "CLIP", name: "Clipboard history", description: "Open a fast local clipboard picker.", actionType: "clipboard_history_open" },
-      { id: "clipboard-history-controls", category: "PRESETS", icon: "CLIP", name: "Clipboard history controls", description: "Add open, next, previous, and confirm clipboard hotkeys. Esc closes the picker.", actionType: "clipboard_history_bundle", count: 4 },
+      { id: "clipboard-quick", category: "CLIPBOARD HISTORY", icon: "CLIP", name: "Click to paste", description: "Open a mouse-friendly clipboard picker. Click any item to paste it into the current app.", actionType: "clipboard_quick_open" },
+      { id: "clipboard-history-controls", category: "CLIPBOARD HISTORY", icon: "CLIP", name: "Hotkey picker", description: "Add customizable hotkeys for opening clipboard history, moving through items, and pasting the selected item. Esc closes the picker.", actionType: "clipboard_history_bundle", count: 4 },
       { id: "open-media-picker", category: "MEDIA", icon: "PICK", name: "Open media picker", description: "Choose a media target to control.", actionType: "media_picker_open" },
       { id: "media-next", category: "MEDIA", icon: "NEXT", name: "Media next / picker next", description: "Skip media or move the picker selection forward.", actionType: "media_next_contextual" },
       { id: "media-previous", category: "MEDIA", icon: "PREV", name: "Media previous / picker previous", description: "Go back or move the picker selection backward.", actionType: "media_previous_contextual" },
@@ -922,6 +945,7 @@
     if (type === "push_to_talk") return { type: "builtin", name: "push_to_talk", ptt_overlay: true };
     if (type === "push_to_mute") return { type: "builtin", name: "push_to_mute", ptt_overlay: true };
     if (type === "clipboard_history_open") return { type: "builtin", name: "clipboard_history_open" };
+    if (type === "clipboard_quick_open") return { type: "builtin", name: "clipboard_quick_open" };
     if (type === "clipboard_history_next") return { type: "builtin", name: "clipboard_history_next" };
     if (type === "clipboard_history_previous") return { type: "builtin", name: "clipboard_history_previous" };
     if (type === "clipboard_history_confirm") return { type: "builtin", name: "clipboard_history_confirm" };
@@ -1068,14 +1092,14 @@
     }
 
     if (!added.length) {
-      pushToast("Clipboard history controls already exist.", "info");
+      pushToast("Hotkey picker controls already exist.", "info");
       return;
     }
 
     config.bindings = [...config.bindings, ...added];
     touch();
-    pushToast(`Clipboard history controls created with ${added.length} hotkeys.`, "success");
-    logEvent("created clipboard history controls", "ok");
+    pushToast(`Hotkey picker controls created with ${added.length} hotkeys.`, "success");
+    logEvent("created clipboard hotkey picker controls", "ok");
     await focusNewBinding(added[0].id);
   }
 
@@ -1189,7 +1213,7 @@
 
   function clipboardLabel(action: ActionSpec) {
     if (action.type !== "builtin") return "";
-    if (action.name === "clipboard_history_open") return "Open clipboard history";
+    if (action.name === "clipboard_history_open") return "Open picker";
     if (action.name === "clipboard_history_next") return "Next item";
     if (action.name === "clipboard_history_previous") return "Previous item";
     if (action.name === "clipboard_history_confirm") return "Paste selected";
@@ -1233,6 +1257,7 @@
     if (type === "push_to_talk") binding.action = { type: "builtin", name: "push_to_talk", ptt_overlay: true };
     if (type === "push_to_mute") binding.action = { type: "builtin", name: "push_to_mute", ptt_overlay: true };
     if (type === "clipboard_history_open") binding.action = { type: "builtin", name: "clipboard_history_open" };
+    if (type === "clipboard_quick_open") binding.action = { type: "builtin", name: "clipboard_quick_open" };
     if (type === "clipboard_history_next") binding.action = { type: "builtin", name: "clipboard_history_next" };
     if (type === "clipboard_history_previous") binding.action = { type: "builtin", name: "clipboard_history_previous" };
     if (type === "clipboard_history_confirm") binding.action = { type: "builtin", name: "clipboard_history_confirm" };
@@ -1337,7 +1362,7 @@
   function captureHotkey(event: KeyboardEvent, binding: BindingSpec) {
     event.preventDefault();
     if (event.key === "Escape") {
-      recordingBindingId = "";
+      stopHotkeyCapture();
       return;
     }
     const parts: string[] = [];
@@ -1349,13 +1374,34 @@
     const key = normalizeKey(event.key);
     if (!key) return;
 
+    // Any combo is accepted here — even one already in use. Conflicts are surfaced
+    // by duplicateHotkeys and block saving until resolved, so a straight swap works
+    // without needing a temporary placeholder hotkey.
     binding.hotkey = [...parts, key].join("+");
-    recordingBindingId = "";
+    stopHotkeyCapture();
     touch();
   }
 
+  async function suspendDaemonHotkeys() {
+    // Release the daemon's global hotkeys while recording so an already-bound combo
+    // reaches the recorder instead of firing its action (RegisterHotKey swallows it).
+    try {
+      await invoke("send_daemon_command", { command: "suspend_hotkeys" });
+    } catch {
+      // Recording still works for unbound combos even if suspend fails.
+    }
+  }
+
   function startHotkeyCapture(binding: BindingSpec) {
+    if (recordingBindingId === binding.id) return;
     recordingBindingId = binding.id;
+    void suspendDaemonHotkeys();
+  }
+
+  function stopHotkeyCapture() {
+    if (!recordingBindingId) return;
+    recordingBindingId = "";
+    void invoke("send_daemon_command", { command: "resume_hotkeys" }).catch(() => undefined);
   }
 
   function captureCommandHotkey(event: KeyboardEvent) {
@@ -1385,10 +1431,11 @@
     if (action.name === "cycle_microphone_input") return "Cycle microphone input";
     if (action.name === "push_to_talk") return "Push to talk";
     if (action.name === "push_to_mute") return "Push to mute";
-    if (action.name === "clipboard_history_open") return "Clipboard history";
-    if (action.name === "clipboard_history_next") return "Clipboard history next";
-    if (action.name === "clipboard_history_previous") return "Clipboard history previous";
-    if (action.name === "clipboard_history_confirm") return "Clipboard history confirm";
+    if (action.name === "clipboard_history_open") return "Open clipboard picker";
+    if (action.name === "clipboard_quick_open") return "Click to paste";
+    if (action.name === "clipboard_history_next") return "Next clipboard item";
+    if (action.name === "clipboard_history_previous") return "Previous clipboard item";
+    if (action.name === "clipboard_history_confirm") return "Paste selected item";
     if (action.name === "clipboard_history_cancel") return "Clipboard history cancel";
     if (action.name === "inspect_clipboard_history") return "Inspect clipboard history";
     if (action.name === "cycle_focused_app_audio_output") return "Focused app output";
@@ -1780,7 +1827,7 @@
                       on:click={() => startHotkeyCapture(binding)}
                       on:keydown={(event) => recordingBindingId === binding.id && captureHotkey(event, binding)}
                       on:blur={() => {
-                        if (recordingBindingId === binding.id) recordingBindingId = "";
+                        if (recordingBindingId === binding.id) stopHotkeyCapture();
                       }}
                     >
                       {recordingBindingId === binding.id ? "Listening..." : "Bind"}
@@ -1807,8 +1854,8 @@
           <article class:deleting={deletingClipboardGroup} class:highlight={highlightedBindingId === "clipboard-history"} class="media-group" on:pointerenter={setCardHoverDirection}>
             <div class="media-group-head">
               <div>
-                <h3>Clipboard history controls</h3>
-                <p>{visibleClipboardRows.length} controls grouped to keep the binding list short.</p>
+                <h3>Clipboard hotkey picker</h3>
+                <p>{visibleClipboardRows.length} customizable controls for moving through clipboard history.</p>
               </div>
               <div class="media-group-actions">
                 <span>{visibleClipboardRows.filter(({ binding }) => binding.enabled).length} on</span>
@@ -1847,7 +1894,7 @@
                       on:click={() => startHotkeyCapture(binding)}
                       on:keydown={(event) => recordingBindingId === binding.id && captureHotkey(event, binding)}
                       on:blur={() => {
-                        if (recordingBindingId === binding.id) recordingBindingId = "";
+                        if (recordingBindingId === binding.id) stopHotkeyCapture();
                       }}
                     >
                       {recordingBindingId === binding.id ? "Listening..." : "Bind"}
@@ -1909,7 +1956,7 @@
                     on:click={() => startHotkeyCapture(binding)}
                     on:keydown={(event) => recordingBindingId === binding.id && captureHotkey(event, binding)}
                     on:blur={() => {
-                      if (recordingBindingId === binding.id) recordingBindingId = "";
+                      if (recordingBindingId === binding.id) stopHotkeyCapture();
                     }}
                   >
                     {recordingBindingId === binding.id ? "Listening..." : "Bind"}
@@ -1925,20 +1972,21 @@
                   <option value="cycle_microphone_input">Cycle microphone input</option>
                   <option value="push_to_talk">Push to talk</option>
                   <option value="push_to_mute">Push to mute</option>
-                  <option value="clipboard_history_open">Clipboard history</option>
+                  <option value="clipboard_history_open">Open clipboard picker</option>
+                  <option value="clipboard_quick_open">Click to paste</option>
                   <option value="cycle_focused_app_audio_output">Focused app output</option>
                   <option value="cycle_focused_app_microphone_input">Focused app microphone</option>
                   <option value="media_picker_bundle">Media picker controls</option>
-                  <option value="clipboard_history_bundle">Clipboard history controls</option>
+                  <option value="clipboard_history_bundle">Clipboard hotkey picker</option>
                   <option value="close_focused_app">Close focused app</option>
                   <option value="kill_focused_app">Kill focused app</option>
                   {#if advancedVisible}
                     <option value="inspect_focused_app_audio">Inspect focused app audio</option>
                     <option value="inspect_media_sessions">Inspect media sessions</option>
                     <option value="inspect_clipboard_history">Inspect clipboard history</option>
-                    <option value="clipboard_history_next">Clipboard history next</option>
-                    <option value="clipboard_history_previous">Clipboard history previous</option>
-                    <option value="clipboard_history_confirm">Clipboard history confirm</option>
+                    <option value="clipboard_history_next">Next clipboard item</option>
+                    <option value="clipboard_history_previous">Previous clipboard item</option>
+                    <option value="clipboard_history_confirm">Paste selected item</option>
                     <option value="media_picker_open">Open media picker</option>
                     <option value="media_next_contextual">Media next / picker next</option>
                     <option value="media_previous_contextual">Media previous / picker previous</option>
@@ -2204,6 +2252,46 @@
             </div>
           </article>
 
+          <article class="settings-card" on:pointerenter={setCardHoverDirection}>
+            <div class="settings-card-head">
+              <div>
+                <h3>Administrator access</h3>
+                <p>Some games and apps run as administrator. Windows then blocks a standard daemon from receiving hotkeys while they are focused &mdash; the fix for "my hotkeys/menus don't work in this game".</p>
+              </div>
+              <span>{daemonElevated ? "Elevated" : "Standard"}</span>
+            </div>
+
+            <div class="bridge-status">
+              <span class:online={daemonElevated} class="bridge-dot"></span>
+              <div>
+                <strong>{daemonElevated ? "Daemon is running as administrator" : "Daemon is running with standard rights"}</strong>
+                <p>{daemonElevated ? "Hotkeys work even inside apps launched as administrator." : "Hotkeys may not fire inside apps that run as administrator."}</p>
+              </div>
+            </div>
+
+            <button
+              class="primary"
+              disabled={!!busyAction || daemonElevated}
+              on:click={restartDaemonAsAdmin}
+            >
+              {isBusy("restart-admin") ? "Restarting..." : daemonElevated ? "Already elevated" : "Restart daemon as administrator"}
+            </button>
+
+            <label class="inline-check">
+              <input
+                type="checkbox"
+                checked={startupStatus.elevated_enabled}
+                disabled={!!busyAction}
+                on:change={(event) => setDaemonElevatedStartup(event.currentTarget.checked)}
+              />
+              <span>Start with Windows as administrator (via a scheduled task, no UAC prompt each login)</span>
+            </label>
+
+            <div class="settings-note">
+              Elevated startup registers a Windows scheduled task with highest privileges and replaces the normal sign-in launch. Restarting as administrator shows a one-time Windows UAC prompt.
+            </div>
+          </article>
+
           {#if advancedVisible}
             <article class="settings-card" on:pointerenter={setCardHoverDirection}>
               <div class="settings-card-head">
@@ -2234,7 +2322,7 @@
                   <p>{browserBridge.clients} {browserBridge.clients === 1 ? "browser" : "browsers"} connected, {browserBridge.targets} {browserBridge.targets === 1 ? "media tab" : "media tabs"} visible.</p>
                 {:else}
                   <strong>{browserBridgeCheckingVisual ? "Checking connection" : "Not connected"}</strong>
-                  <p>Without the extension, media tabs like YouTube, YouTube Music, Spotify, and similar sites are grouped under one browser entry, so per-tab control is limited.</p>
+                  <p>Set up the extension for reliable browser skip. Without it, media tabs like YouTube, YouTube Music, Spotify, and similar sites are grouped under one browser entry, and Next/Previous only work when the browser exposes those controls to Windows.</p>
                 {/if}
               </div>
             </div>
@@ -2263,7 +2351,7 @@
             </div>
 
             <div class="settings-note">
-              The media picker still works without the extension, but media tabs are grouped as one browser target instead of separate playable tabs.
+              The media picker still works without the extension, but browser skip is not reliable there. Install the extension to show separate playable tabs and make Next/Previous target the chosen tab.
             </div>
           </article>
         </div>
@@ -2440,7 +2528,7 @@
         {:else if onboardingCurrent === "browser"}
           <section class="onboarding-step">
             <h2>Optional browser extension</h2>
-            <p>Without the extension, your browser shows up as one app. With it, individual YouTube, YouTube Music, Spotify, and similar tabs appear separately so you can control the exact one you want.</p>
+            <p>Reliable browser skip needs the extension. Without it, your browser shows up as one app and Next/Previous only work when the browser exposes those controls to Windows. With it, individual YouTube, YouTube Music, Spotify, and similar tabs appear separately so you can control the exact one you want.</p>
             <div class="bridge-actions intro-actions">
               <button class="primary-soft" disabled={!!busyAction} on:click={() => openExtensionsPage("brave")}>Brave</button>
               <button class="ghost" disabled={!!busyAction} on:click={() => openExtensionsPage("chrome")}>Chrome</button>
@@ -2512,7 +2600,7 @@
         <span class="intro-kicker">Optional upgrade</span>
         <h2>Show browser tabs in Media Picker</h2>
         <p>
-          Media Picker works now, but without the extension, individual browser tabs playing media, like YouTube, YouTube Music, Spotify, and similar sites, show up as one browser target. That limits choosing and controlling a specific tab. Install the extension to show those tabs separately.
+          Media Picker works now, but reliable browser skip needs the extension. Without it, individual browser tabs playing media, like YouTube, YouTube Music, Spotify, and similar sites, show up as one browser target, and Next/Previous only work when the browser exposes those controls to Windows. Install the extension to show tabs separately and control the exact one you choose.
         </p>
         <div class="setup-steps intro-steps">
           <div><span>1</span> Install the extension in your browser.</div>

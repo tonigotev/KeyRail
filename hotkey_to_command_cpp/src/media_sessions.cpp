@@ -39,10 +39,22 @@ namespace {
 constexpr UINT WM_MEDIA_OVERLAY_UPDATE = WM_APP + 40;
 constexpr UINT WM_MEDIA_OVERLAY_HIDE = WM_APP + 41;
 constexpr UINT_PTR kOverlayTimer = 1;
+constexpr UINT_PTR kOverlayTopmostPulseTimer = 2;
 constexpr int kPickerWidth = 612;
-constexpr int kToastWidth = 460;
+constexpr int kToastMinWidth = 300;
+constexpr int kToastMaxWidth = 560;
 constexpr int kOverlayMargin = 36;
 constexpr int kOverlayTopMargin = 72;
+
+// Toast (message overlay) layout. The card is a single horizontal row: an accent
+// badge on the left and the message text beside it, both vertically centered as a
+// group. All placement derives from these so the icon and text stay aligned for
+// one line or several.
+constexpr int kToastBadge = 20;      // badge diameter
+constexpr int kToastPadX = 18;       // left/right padding
+constexpr int kToastPadY = 16;       // top/bottom padding
+constexpr int kToastGap = 14;        // gap between badge and text
+constexpr int kToastMinHeight = 56;
 
 ULONG_PTR g_gdiplusToken = 0;
 
@@ -317,6 +329,17 @@ bool isBrowserWindowsSession(const MediaTarget& target) {
         || app.find(L"vivaldi") != std::wstring::npos;
 }
 
+std::wstring browserFamilyKey(const std::wstring& appId) {
+    const std::wstring app = lowerCopy(appId);
+    if (app.find(L"brave") != std::wstring::npos) return L"brave";
+    if (app.find(L"msedge") != std::wstring::npos || app.find(L"edge") != std::wstring::npos) return L"edge";
+    if (app.find(L"chrome") != std::wstring::npos || app.find(L"chromium") != std::wstring::npos) return L"chrome";
+    if (app.find(L"firefox") != std::wstring::npos) return L"firefox";
+    if (app.find(L"opera") != std::wstring::npos) return L"opera";
+    if (app.find(L"vivaldi") != std::wstring::npos) return L"vivaldi";
+    return {};
+}
+
 void replaceBrowserAppSessionsWhenTabsExist(
     std::vector<MediaTarget>& targets,
     const std::vector<MediaTarget>& browserTargets,
@@ -324,8 +347,23 @@ void replaceBrowserAppSessionsWhenTabsExist(
     if (hiddenBrowserAppSessions) *hiddenBrowserAppSessions = 0;
     if (browserTargets.empty()) return;
 
+    std::vector<std::wstring> browserFamiliesWithTabs;
+    for (const MediaTarget& target : browserTargets) {
+        std::wstring family = browserFamilyKey(target.appId);
+        if (!family.empty()
+            && std::find(browserFamiliesWithTabs.begin(), browserFamiliesWithTabs.end(), family) == browserFamiliesWithTabs.end()) {
+            browserFamiliesWithTabs.push_back(std::move(family));
+        }
+    }
+    if (browserFamiliesWithTabs.empty()) return;
+
     const size_t before = targets.size();
-    targets.erase(std::remove_if(targets.begin(), targets.end(), isBrowserWindowsSession), targets.end());
+    targets.erase(std::remove_if(targets.begin(), targets.end(), [&](const MediaTarget& target) {
+        if (!isBrowserWindowsSession(target)) return false;
+        const std::wstring family = browserFamilyKey(target.appId);
+        return !family.empty()
+            && std::find(browserFamiliesWithTabs.begin(), browserFamiliesWithTabs.end(), family) != browserFamiliesWithTabs.end();
+    }), targets.end());
     if (hiddenBrowserAppSessions) *hiddenBrowserAppSessions = before - targets.size();
 }
 
@@ -477,6 +515,71 @@ void drawTextLine(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLOR
     SetTextColor(dc, color);
     DrawTextW(dc, text.c_str(), -1, &rect, align | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
     SelectObject(dc, oldFont);
+}
+
+void drawTextBlock(HDC dc, const std::wstring& text, RECT rect, HFONT font, COLORREF color, UINT align = DT_LEFT) {
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, color);
+    DrawTextW(dc, text.c_str(), -1, &rect, align | DT_WORDBREAK | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+}
+
+// Measure the pixel height of a word-wrapped block of text at a fixed width.
+int measureWrappedHeight(const std::wstring& text, HFONT font, int width) {
+    HDC dc = GetDC(nullptr);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    RECT r{0, 0, width, 0};
+    DrawTextW(dc, text.c_str(), -1, &r, DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT);
+    SelectObject(dc, oldFont);
+    ReleaseDC(nullptr, dc);
+    return r.bottom - r.top;
+}
+
+// Natural card width for a message: wide enough for the longest line, clamped.
+int toastWidthForMessage(const std::wstring& message) {
+    size_t longestLine = 0;
+    size_t currentLine = 0;
+    for (wchar_t ch : message) {
+        if (ch == L'\n') {
+            longestLine = (std::max)(longestLine, currentLine);
+            currentLine = 0;
+        } else {
+            ++currentLine;
+        }
+    }
+    longestLine = (std::max)(longestLine, currentLine);
+
+    const int chrome = kToastPadX * 2 + kToastBadge + kToastGap;
+    const int naturalWidth = chrome + static_cast<int>(longestLine) * 8;
+    return (std::min)(kToastMaxWidth, (std::max)(kToastMinWidth, naturalWidth));
+}
+
+struct ToastLayout {
+    int width = 0;
+    int height = 0;
+    int textLeft = 0;
+    int textWidth = 0;
+    int textHeight = 0;
+    int contentHeight = 0;   // max(badge, text) — the vertically centered group
+};
+
+// Compute the toast card geometry from the message. Both the sizing code and the
+// painter use this, so the window is always exactly tall enough and the badge and
+// text share one vertical center.
+ToastLayout computeToastLayout(const std::wstring& message) {
+    ToastLayout layout;
+    layout.width = toastWidthForMessage(message);
+    layout.textLeft = kToastPadX + kToastBadge + kToastGap;
+    layout.textWidth = layout.width - layout.textLeft - kToastPadX;
+
+    HFONT font = makeFont(15, FW_SEMIBOLD);
+    layout.textHeight = measureWrappedHeight(message, font, layout.textWidth);
+    DeleteObject(font);
+
+    layout.contentHeight = (std::max)(kToastBadge, layout.textHeight);
+    layout.height = (std::max)(kToastMinHeight, layout.contentHeight + kToastPadY * 2);
+    return layout;
 }
 
 // Draw a raised keycap pill background at the given rect (antialiased, top-light gradient).
@@ -848,15 +951,21 @@ void paintConfirmationOverlay(HDC dc, const RECT& bounds, const OverlayState& st
 
 void paintMessageOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    // Accent-tinted border matches the confirmation overlay vocabulary.
     fillRoundRect(dc, panel, 18, kPanel);
+    drawOverlayShell(dc, panel); // same accent border as the picker/confirmation
 
-    // Accent check circle with a centered white tick (antialiased).
-    RECT dot{18, 24, 38, 44};
-    drawCheckBadge(dc, dot, kAccent, RGB(240, 245, 255));
+    const ToastLayout layout = computeToastLayout(state.message);
 
-    RECT textRect{50, 13, panel.right - 18, panel.bottom - 12};
-    drawTextLine(dc, state.message, textRect, titleFont, RGB(240, 242, 248));
+    // Vertically center the badge + text group within the card.
+    const int contentTop = (bounds.bottom - layout.contentHeight) / 2;
+
+    const int badgeTop = contentTop + (layout.contentHeight - kToastBadge) / 2;
+    RECT badge{kToastPadX, badgeTop, kToastPadX + kToastBadge, badgeTop + kToastBadge};
+    drawCheckBadge(dc, badge, kAccent, RGB(240, 245, 255));
+
+    const int textTop = contentTop + (layout.contentHeight - layout.textHeight) / 2;
+    RECT textRect{layout.textLeft, textTop, layout.textLeft + layout.textWidth, textTop + layout.textHeight};
+    drawTextBlock(dc, state.message, textRect, titleFont, RGB(240, 242, 248));
 }
 
 void paintOverlay(HDC dc, const RECT& bounds, const OverlayState& state) {
@@ -880,7 +989,9 @@ void paintOverlay(HDC dc, const RECT& bounds, const OverlayState& state) {
 }
 
 int overlayHeightForState(const OverlayState& state) {
-    if (state.mode == OverlayMode::Message) return 68;
+    if (state.mode == OverlayMode::Message) {
+        return computeToastLayout(state.message).height;
+    }
     if (state.mode == OverlayMode::Confirmation) return 212;
     if (state.mode == OverlayMode::Picker && state.targets.empty()) return 272;
     if (state.mode == OverlayMode::Picker) {
@@ -891,7 +1002,7 @@ int overlayHeightForState(const OverlayState& state) {
 }
 
 int overlayWidthForState(const OverlayState& state) {
-    return state.mode == OverlayMode::Message ? kToastWidth : kPickerWidth;
+    return state.mode == OverlayMode::Message ? computeToastLayout(state.message).width : kPickerWidth;
 }
 
 RECT overlayWorkArea() {
@@ -906,6 +1017,17 @@ RECT overlayWorkArea() {
     MONITORINFO info{};
     info.cbSize = sizeof(info);
     if (monitor && GetMonitorInfoW(monitor, &info)) {
+        if (foreground) {
+            RECT foregroundRect{};
+            if (GetWindowRect(foreground, &foregroundRect)) {
+                const bool coversMonitor =
+                    foregroundRect.left <= info.rcMonitor.left + 2
+                    && foregroundRect.top <= info.rcMonitor.top + 2
+                    && foregroundRect.right >= info.rcMonitor.right - 2
+                    && foregroundRect.bottom >= info.rcMonitor.bottom - 2;
+                if (coversMonitor) return info.rcMonitor;
+            }
+        }
         return info.rcWork;
     }
 
@@ -928,6 +1050,20 @@ POINT overlayPositionForSize(int width, int height) {
     return {x, y};
 }
 
+void showOverlayTopmost(HWND hwnd, int x, int y, int width, int height) {
+    constexpr UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER;
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags);
+    ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    BringWindowToTop(hwnd);
+    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags | SWP_NOSENDCHANGING);
+}
+
+void pulseOverlayTopmost(HWND hwnd) {
+    if (!IsWindowVisible(hwnd)) return;
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
+}
+
 LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
     switch (message) {
     case WM_MEDIA_OVERLAY_UPDATE:
@@ -942,20 +1078,24 @@ LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         const POINT position = overlayPositionForSize(width, height);
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18);
         SetWindowRgn(hwnd, region, TRUE);
-        SetWindowPos(hwnd, HWND_TOPMOST, position.x, position.y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        showOverlayTopmost(hwnd, position.x, position.y, width, height);
         InvalidateRect(hwnd, nullptr, TRUE);
         SetTimer(hwnd, kOverlayTimer, static_cast<UINT>(wParam == 0 ? 5000 : wParam), nullptr);
+        SetTimer(hwnd, kOverlayTopmostPulseTimer, 80, nullptr);
         return 0;
     }
     case WM_MEDIA_OVERLAY_HIDE:
         ShowWindow(hwnd, SW_HIDE);
         KillTimer(hwnd, kOverlayTimer);
+        KillTimer(hwnd, kOverlayTopmostPulseTimer);
         return 0;
     case WM_TIMER:
         if (wParam == kOverlayTimer) {
             ShowWindow(hwnd, SW_HIDE);
             KillTimer(hwnd, kOverlayTimer);
+            KillTimer(hwnd, kOverlayTopmostPulseTimer);
+        } else if (wParam == kOverlayTopmostPulseTimer) {
+            pulseOverlayTopmost(hwnd);
         }
         return 0;
     case WM_PAINT: {
@@ -994,14 +1134,14 @@ void overlayThreadMain() {
     RegisterClassW(&wc);
 
     const int height = 68;
-    const POINT position = overlayPositionForSize(kToastWidth, height);
+    const POINT position = overlayPositionForSize(kToastMaxWidth, height);
 
     g_overlayWindow = CreateWindowExW(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
         wc.lpszClassName,
         L"Hotkey To Command Media Picker",
         WS_POPUP,
-        position.x, position.y, kToastWidth, height,
+        position.x, position.y, kToastMaxWidth, height,
         nullptr, nullptr, wc.hInstance, nullptr);
 
     if (g_overlayWindow) {
@@ -1164,20 +1304,80 @@ bool runMediaCommand(const GlobalSystemMediaTransportControlsSession& session, M
         return false;
     }
 
+    auto controls = session.GetPlaybackInfo().Controls();
     bool ok = false;
     switch (command) {
     case MediaCommand::TogglePlayPause:
         ok = session.TryTogglePlayPauseAsync().get();
         break;
     case MediaCommand::Next:
+        if (!controls.IsNextEnabled()) {
+            if (report) *report = L"Next is not available for this media target.";
+            return false;
+        }
         ok = session.TrySkipNextAsync().get();
         break;
     case MediaCommand::Previous:
+        if (!controls.IsPreviousEnabled()) {
+            if (report) *report = L"Previous is not available for this media target.";
+            return false;
+        }
         ok = session.TrySkipPreviousAsync().get();
         break;
     }
 
     if (report) *report = ok ? L"Media command sent." : L"Media session rejected the command.";
+    return ok;
+}
+
+bool canUseRawSystemMediaKey(MediaCommand command) {
+    return command == MediaCommand::TogglePlayPause;
+}
+
+bool controlBestWindowsMediaSession(MediaCommand command, std::wstring* report) {
+    std::wstring queryReport;
+    std::vector<MediaTarget> targets = queryWindowsMediaTargets(&queryReport);
+
+    auto supportsCommand = [command](const MediaTarget& target) -> bool {
+        switch (command) {
+        case MediaCommand::TogglePlayPause:
+            return target.canTogglePlayPause;
+        case MediaCommand::Next:
+            return target.canNext;
+        case MediaCommand::Previous:
+            return target.canPrevious;
+        }
+        return false;
+    };
+
+    const MediaTarget* best = nullptr;
+    for (const MediaTarget& target : targets) {
+        if (!supportsCommand(target)) continue;
+        if (!best || (target.playing && !best->playing)) best = &target;
+    }
+
+    if (!best) {
+        if (report) {
+            switch (command) {
+            case MediaCommand::Next:
+                *report = L"Browser skip needs the browser media extension set up to work reliably. Windows does not expose Next for this target right now.";
+                break;
+            case MediaCommand::Previous:
+                *report = L"Browser skip needs the browser media extension set up to work reliably. Windows does not expose Previous for this target right now.";
+                break;
+            case MediaCommand::TogglePlayPause:
+                *report = L"No Windows media session exposes Play/Pause right now.";
+                break;
+            }
+        }
+        return false;
+    }
+
+    auto session = findSessionForTarget(targets, best->appId, best->title, best->sessionIndex, report);
+    bool ok = runMediaCommand(session, command, report);
+    if (ok && report) {
+        *report = commandToastText(command) + L" (" + shortAppName(best->appId) + L")";
+    }
     return ok;
 }
 
@@ -1379,7 +1579,22 @@ bool controlSelectedMedia(MediaCommand command, std::wstring* report) {
         if (kind == L"browser") {
             bool ok = controlBrowserMediaTarget(id, command, report);
             if (ok) showOverlay(report && !report->empty() ? *report : commandToastText(command), 950);
-            else if (report && !report->empty()) showOverlay(*report, 1600);
+            else if (canUseRawSystemMediaKey(command)) {
+                std::wstring bridgeReport = report ? *report : L"";
+                std::wstring keyReport;
+                ok = sendSystemMediaKey(command, &keyReport);
+                if (report) {
+                    *report = ok
+                        ? bridgeReport + L" Fallback: " + keyReport
+                        : bridgeReport + L" Fallback failed: " + keyReport;
+                }
+                showOverlay(ok ? keyReport : (report && !report->empty() ? *report : keyReport), ok ? 950 : 1600);
+            } else {
+                if (report && report->empty()) {
+                    *report = L"Set up the browser media extension for reliable browser skip. Without it, browser Next/Previous only works when the page exposes those controls to Windows.";
+                }
+                showOverlay(report && !report->empty() ? *report : L"Set up the browser media extension for reliable browser skip.", 2600);
+            }
             return ok;
         }
 
@@ -1387,8 +1602,21 @@ bool controlSelectedMedia(MediaCommand command, std::wstring* report) {
         std::vector<MediaTarget> targets = queryWindowsMediaTargets(&queryReport);
         auto session = findSessionForTarget(targets, appId, title, fallbackIndex, report);
         bool ok = runMediaCommand(session, command, report);
-        if (ok) showOverlay(commandToastText(command), 950);
-        else if (report && !report->empty()) showOverlay(*report, 1600);
+        if (ok) {
+            showOverlay(commandToastText(command), 950);
+        } else if (canUseRawSystemMediaKey(command)) {
+            std::wstring sessionReport = report ? *report : L"";
+            std::wstring keyReport;
+            ok = sendSystemMediaKey(command, &keyReport);
+            if (report) {
+                *report = ok
+                    ? sessionReport + L" Fallback: " + keyReport
+                    : sessionReport + L" Fallback failed: " + keyReport;
+            }
+                showOverlay(ok ? keyReport : (report && !report->empty() ? *report : keyReport), ok ? 950 : 1600);
+        } else if (report && !report->empty()) {
+            showOverlay(*report, 1800);
+        }
         return ok;
     } catch (const winrt::hresult_error& ex) {
         if (report) *report = L"Media command failed: " + std::wstring(ex.message().c_str());
@@ -1396,23 +1624,56 @@ bool controlSelectedMedia(MediaCommand command, std::wstring* report) {
         if (report) *report = L"Media command failed.";
     }
 
+    if (canUseRawSystemMediaKey(command)) {
+        std::wstring failureReport = report ? *report : L"";
+        std::wstring keyReport;
+        bool ok = sendSystemMediaKey(command, &keyReport);
+        if (report) {
+            *report = ok
+                ? failureReport + L" Fallback: " + keyReport
+                : failureReport + L" Fallback failed: " + keyReport;
+        }
+        showOverlay(ok ? keyReport : (report && !report->empty() ? *report : keyReport), ok ? 950 : 1600);
+        return ok;
+    }
+
+    if (report && !report->empty()) showOverlay(*report, 1800);
     return false;
+}
+
+bool controlSystemMediaFallback(MediaCommand command, std::wstring* report) {
+    bool ok = controlBestWindowsMediaSession(command, report);
+    if (!ok && canUseRawSystemMediaKey(command)) {
+        ok = sendSystemMediaKey(command, report);
+    }
+
+    if (ok) {
+        showOverlay(report && !report->empty() ? *report : commandToastText(command), 950);
+    } else if (report && !report->empty()) {
+        showOverlay(*report, 1800);
+    }
+    return ok;
 }
 
 bool mediaNextContextual(std::wstring* report) {
     if (mediaPickerIsOpen()) return moveMediaPicker(1, report);
-    if (!selectedTargetExists(report)) return false;
-    return controlSelectedMedia(MediaCommand::Next, report);
+    if (!selectedTargetExists(report)) return controlSystemMediaFallback(MediaCommand::Next, report);
+    bool ok = controlSelectedMedia(MediaCommand::Next, report);
+    return ok;
 }
 
 bool mediaPreviousContextual(std::wstring* report) {
     if (mediaPickerIsOpen()) return moveMediaPicker(-1, report);
-    if (!selectedTargetExists(report)) return false;
-    return controlSelectedMedia(MediaCommand::Previous, report);
+    if (!selectedTargetExists(report)) return controlSystemMediaFallback(MediaCommand::Previous, report);
+    bool ok = controlSelectedMedia(MediaCommand::Previous, report);
+    return ok;
 }
 
 bool mediaPlayPauseContextual(std::wstring* report) {
-    return mediaPickerIsOpen() ? confirmMediaPicker(report) : controlSelectedMedia(MediaCommand::TogglePlayPause, report);
+    if (mediaPickerIsOpen()) return confirmMediaPicker(report);
+    if (!selectedTargetExists(report)) return controlSystemMediaFallback(MediaCommand::TogglePlayPause, report);
+    bool ok = controlSelectedMedia(MediaCommand::TogglePlayPause, report);
+    return ok ? true : controlSystemMediaFallback(MediaCommand::TogglePlayPause, report);
 }
 
 std::wstring describeMediaTargets() {

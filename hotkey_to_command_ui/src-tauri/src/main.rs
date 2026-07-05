@@ -34,6 +34,7 @@ use windows_sys::Win32::System::Registry::{
 
 const PIPE_NAME: &str = r"\\.\pipe\hotkeyd-control";
 const STARTUP_VALUE_NAME: &str = "HotkeyToCommandDaemon";
+const ELEVATED_TASK_NAME: &str = "HotkeyToCommandDaemonElevated";
 const RUN_KEY_PATH: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
 #[derive(Serialize)]
@@ -61,6 +62,7 @@ struct BrowserBridgeStatus {
 #[derive(Serialize)]
 struct StartupStatus {
     enabled: bool,
+    elevated_enabled: bool,
     path: Option<String>,
     detail: String,
 }
@@ -557,23 +559,85 @@ fn delete_startup_value() -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(windows)]
+fn elevated_task_exists() -> bool {
+    Command::new("schtasks.exe")
+        .args(["/Query", "/TN", ELEVATED_TASK_NAME])
+        .creation_flags(0x08000000)
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn set_elevated_startup_task(enabled: bool) -> Result<(), String> {
+    if enabled {
+        let daemon = startup_daemon_path()?;
+        let task_run = quote_windows_path(&daemon);
+        let output = Command::new("schtasks.exe")
+            .args([
+                "/Create",
+                "/TN",
+                ELEVATED_TASK_NAME,
+                "/SC",
+                "ONLOGON",
+                "/TR",
+                &task_run,
+                "/RL",
+                "HIGHEST",
+                "/F",
+            ])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("could not create elevated startup task: {stderr}{stdout}"));
+        }
+    } else {
+        let output = Command::new("schtasks.exe")
+            .args(["/Delete", "/TN", ELEVATED_TASK_NAME, "/F"])
+            .creation_flags(0x08000000)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !output.status.success() && elevated_task_exists() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!("could not remove elevated startup task: {stderr}{stdout}"));
+        }
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn daemon_startup_status() -> Result<StartupStatus, String> {
     #[cfg(windows)]
     {
         let value = query_startup_value()?;
+        let elevated_enabled = elevated_task_exists();
         let Some(command) = value else {
             return Ok(StartupStatus {
-                enabled: false,
+                enabled: elevated_enabled,
+                elevated_enabled,
                 path: None,
-                detail: "Daemon will not start with Windows.".to_string(),
+                detail: if elevated_enabled {
+                    "Daemon starts with Windows as administrator.".to_string()
+                } else {
+                    "Daemon will not start with Windows.".to_string()
+                },
             });
         };
 
         Ok(StartupStatus {
             enabled: true,
+            elevated_enabled,
             path: Some(command.clone()),
-            detail: format!("Windows starts the daemon with: {command}"),
+            detail: if elevated_enabled {
+                format!("Windows starts the daemon normally and also has an administrator startup task: {command}")
+            } else {
+                format!("Windows starts the daemon with: {command}")
+            },
         })
     }
 
@@ -581,6 +645,7 @@ fn daemon_startup_status() -> Result<StartupStatus, String> {
     {
         Ok(StartupStatus {
             enabled: false,
+            elevated_enabled: false,
             path: None,
             detail: "Startup registration is only available on Windows.".to_string(),
         })
@@ -604,6 +669,26 @@ fn set_daemon_startup(enabled: bool) -> Result<StartupStatus, String> {
     {
         let _ = enabled;
         Err("startup registration is only available on Windows".to_string())
+    }
+}
+
+#[tauri::command]
+fn set_daemon_elevated_startup(enabled: bool) -> Result<StartupStatus, String> {
+    #[cfg(windows)]
+    {
+        if enabled {
+            delete_startup_value()?;
+            set_elevated_startup_task(true)?;
+        } else {
+            set_elevated_startup_task(false)?;
+        }
+        daemon_startup_status()
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+        Err("elevated startup is only available on Windows".to_string())
     }
 }
 
@@ -770,6 +855,31 @@ fn ensure_daemon() -> Result<(), String> {
 }
 
 #[tauri::command]
+fn restart_daemon_as_admin() -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let daemon = startup_daemon_path()?;
+        let _ = send_pipe_raw("quit");
+        thread::sleep(Duration::from_millis(250));
+        let script = format!(
+            "Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden",
+            daemon.display().to_string().replace('\'', "''")
+        );
+        Command::new("powershell.exe")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        Err("administrator restart is only available on Windows".to_string())
+    }
+}
+
+#[tauri::command]
 fn select_app_path() -> Option<String> {
     rfd::FileDialog::new()
         .add_filter("Applications", &["exe"])
@@ -822,6 +932,8 @@ fn main() {
             send_daemon_command,
             daemon_startup_status,
             set_daemon_startup,
+            set_daemon_elevated_startup,
+            restart_daemon_as_admin,
             browser_bridge_status,
             select_app_path,
             select_script_path,

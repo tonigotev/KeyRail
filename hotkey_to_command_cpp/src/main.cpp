@@ -16,6 +16,8 @@
 
 static constexpr UINT WM_HOTKEYD_RELOAD = WM_APP + 1;
 static constexpr UINT WM_HOTKEYD_QUIT = WM_APP + 2;
+static constexpr UINT WM_HOTKEYD_SUSPEND = WM_APP + 3;
+static constexpr UINT WM_HOTKEYD_RESUME = WM_APP + 4;
 static constexpr int QUIT_HOTKEY_ID = 9000;
 static constexpr wchar_t kSingleInstanceMutex[] = L"Local\\HotkeyToCommandHotkeyd";
 
@@ -34,6 +36,17 @@ static void setStatus(DaemonState& state, const std::wstring& status) {
 static std::wstring getStatus(DaemonState& state) {
     std::lock_guard<std::mutex> lock(state.statusMutex);
     std::wstring status = state.status;
+    HANDLE token = nullptr;
+    TOKEN_ELEVATION elevation{};
+    DWORD returned = 0;
+    bool elevated = false;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &returned)) {
+            elevated = elevation.TokenIsElevated != 0;
+        }
+        CloseHandle(token);
+    }
+    status += std::wstring(L"daemon elevated: ") + (elevated ? L"yes\n" : L"no\n");
     std::wstring event = state.registry.lastEvent();
     if (!event.empty()) status += event + L"\n";
     return status;
@@ -88,6 +101,8 @@ int main() {
         mainThreadId,
         WM_HOTKEYD_RELOAD,
         WM_HOTKEYD_QUIT,
+        WM_HOTKEYD_SUSPEND,
+        WM_HOTKEYD_RESUME,
         [&state] { return getStatus(state); });
     pipe.start();
 
@@ -107,6 +122,20 @@ int main() {
 
         if (msg.message == WM_HOTKEYD_QUIT) {
             break;
+        }
+
+        if (msg.message == WM_HOTKEYD_SUSPEND) {
+            // Temporarily release all global hotkeys so the UI can record a combo
+            // that is currently in use (RegisterHotKey otherwise swallows it).
+            state.registry.clear();
+            setStatus(state, L"hotkeys suspended for rebinding\n");
+            continue;
+        }
+
+        if (msg.message == WM_HOTKEYD_RESUME) {
+            std::wstring status = state.registry.apply(state.activeConfig);
+            setStatus(state, status);
+            continue;
         }
 
         if (msg.message == WM_HOTKEY) {

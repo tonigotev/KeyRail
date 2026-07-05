@@ -34,7 +34,14 @@ constexpr char kWebSocketGuid[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 struct BrowserClient {
     SOCKET socket = INVALID_SOCKET;
     std::mutex sendMutex;
+    int id = 0;
+    std::atomic<long long> lastActivityMs{0};
 };
+
+long long nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
 
 struct PendingResponse {
     std::mutex mutex;
@@ -54,13 +61,17 @@ struct BridgeResult {
 std::atomic<bool> g_running{false};
 SOCKET g_listenSocket = INVALID_SOCKET;
 std::thread g_acceptThread;
+std::thread g_heartbeatThread;
 std::mutex g_clientsMutex;
 std::vector<std::shared_ptr<BrowserClient>> g_clients;
+std::atomic<int> g_nextClientId{1};
 unsigned short g_port = 8790;
 
 std::mutex g_targetsMutex;
 std::condition_variable g_targetsChanged;
-std::vector<MediaTarget> g_targets;
+std::vector<MediaTarget> g_targets;                          // merged view across all clients
+std::unordered_map<int, std::vector<MediaTarget>> g_targetsByClient;
+std::unordered_map<std::wstring, int> g_targetOwner;         // target id -> owning client id
 unsigned long long g_targetsRevision = 0;
 std::atomic<unsigned long long> g_nextMessageId{1};
 std::mutex g_pendingMutex;
@@ -192,16 +203,18 @@ bool sendTextFrame(const std::shared_ptr<BrowserClient>& client, const std::stri
     return sendAll(client->socket, reinterpret_cast<const char*>(frame.data()), static_cast<int>(frame.size()));
 }
 
-bool readTextFrame(SOCKET socket, std::string* text) {
+// Read one raw WebSocket frame. Returns false on connection error or a close
+// frame. On success, fills fin/opcode/payload (payload already unmasked).
+bool readRawFrame(SOCKET socket, bool& fin, unsigned char& opcode, std::string& payload) {
     unsigned char header[2]{};
     if (!recvAll(socket, header, sizeof(header))) return false;
 
-    const unsigned char opcode = header[0] & 0x0f;
+    fin = (header[0] & 0x80) != 0;
+    opcode = header[0] & 0x0f;
     const bool masked = (header[1] & 0x80) != 0;
     unsigned long long length = header[1] & 0x7f;
 
-    if (opcode == 0x8) return false;
-    if (opcode != 0x1) return true;
+    if (opcode == 0x8) return false; // close
 
     if (length == 126) {
         unsigned char ext[2]{};
@@ -216,9 +229,9 @@ bool readTextFrame(SOCKET socket, std::string* text) {
 
     unsigned char mask[4]{};
     if (masked && !recvAll(socket, mask, sizeof(mask))) return false;
-    if (length > 1024 * 1024) return false;
+    if (length > 32ull * 1024 * 1024) return false;
 
-    std::string payload(static_cast<size_t>(length), '\0');
+    payload.assign(static_cast<size_t>(length), '\0');
     if (length > 0 && !recvAll(socket, reinterpret_cast<unsigned char*>(payload.data()), static_cast<size_t>(length))) return false;
 
     if (masked) {
@@ -226,9 +239,47 @@ bool readTextFrame(SOCKET socket, std::string* text) {
             payload[i] = static_cast<char>(payload[i] ^ mask[i % 4]);
         }
     }
-
-    *text = std::move(payload);
     return true;
+}
+
+// Read a complete application text message. Chromium fragments large outgoing
+// messages (e.g. media_targets with inlined artwork) into a lead frame plus
+// continuation frames, and may interleave control frames, so we must reassemble
+// fragments until FIN instead of treating a single frame as the whole message.
+bool readTextFrame(SOCKET socket, std::string* text) {
+    std::string message;
+    bool started = false;
+    bool textMessage = false;
+
+    while (true) {
+        bool fin = false;
+        unsigned char opcode = 0;
+        std::string payload;
+        if (!readRawFrame(socket, fin, opcode, payload)) return false;
+
+        if (opcode == 0x9 || opcode == 0xA) {
+            // Ping/pong control frames (always unfragmented) — ignore and keep reading.
+            continue;
+        }
+
+        if (opcode == 0x1 || opcode == 0x2) {
+            message = std::move(payload);
+            started = true;
+            textMessage = (opcode == 0x1);
+        } else if (opcode == 0x0 && started) {
+            message += payload;
+        } else {
+            // Continuation without a start, or an unknown opcode — ignore this frame.
+            continue;
+        }
+
+        if (message.size() > 32ull * 1024 * 1024) return false;
+
+        if (fin) {
+            *text = textMessage ? std::move(message) : std::string();
+            return true;
+        }
+    }
 }
 
 std::string nextMessageId() {
@@ -240,9 +291,50 @@ std::vector<std::shared_ptr<BrowserClient>> clientsSnapshot() {
     return g_clients;
 }
 
-void removeClient(const std::shared_ptr<BrowserClient>& client) {
+std::shared_ptr<BrowserClient> clientById(int id) {
     std::lock_guard<std::mutex> lock(g_clientsMutex);
-    g_clients.erase(std::remove(g_clients.begin(), g_clients.end(), client), g_clients.end());
+    for (const auto& client : g_clients) {
+        if (client->id == id) return client;
+    }
+    return nullptr;
+}
+
+int ownerForTarget(const std::wstring& targetId) {
+    std::lock_guard<std::mutex> lock(g_targetsMutex);
+    auto found = g_targetOwner.find(targetId);
+    return found == g_targetOwner.end() ? 0 : found->second;
+}
+
+// Rebuild the merged target list and owner map from every client's cache.
+// Caller must hold g_targetsMutex.
+void rebuildMergedTargetsLocked() {
+    g_targets.clear();
+    g_targetOwner.clear();
+    for (const auto& entry : g_targetsByClient) {
+        for (const MediaTarget& target : entry.second) {
+            // Multiple clients (e.g. a stale connection lingering after the
+            // extension's service worker reconnects) can report the same tab.
+            // Ids are stable per tab+frame, so skip any we've already merged.
+            if (g_targetOwner.count(target.id)) continue;
+            g_targetOwner[target.id] = entry.first;
+            g_targets.push_back(target);
+        }
+    }
+}
+
+void removeClient(const std::shared_ptr<BrowserClient>& client) {
+    {
+        std::lock_guard<std::mutex> lock(g_clientsMutex);
+        g_clients.erase(std::remove(g_clients.begin(), g_clients.end(), client), g_clients.end());
+    }
+
+    {
+        std::lock_guard<std::mutex> targetsLock(g_targetsMutex);
+        g_targetsByClient.erase(client->id);
+        rebuildMergedTargetsLocked();
+        ++g_targetsRevision;
+    }
+    g_targetsChanged.notify_all();
 }
 
 MediaTarget parseTarget(const json& value) {
@@ -267,7 +359,7 @@ MediaTarget parseTarget(const json& value) {
     return target;
 }
 
-void updateTargetsFromJson(const json& targetsJson) {
+void updateTargetsFromJson(int clientId, const json& targetsJson) {
     if (!targetsJson.is_array()) return;
 
     std::vector<MediaTarget> targets;
@@ -279,7 +371,8 @@ void updateTargetsFromJson(const json& targetsJson) {
 
     {
         std::lock_guard<std::mutex> lock(g_targetsMutex);
-        g_targets = std::move(targets);
+        g_targetsByClient[clientId] = std::move(targets);
+        rebuildMergedTargetsLocked();
         ++g_targetsRevision;
     }
     g_targetsChanged.notify_all();
@@ -355,7 +448,7 @@ void handleMessage(const std::shared_ptr<BrowserClient>& client, const std::stri
         }
 
         if (type == "media_targets") {
-            updateTargetsFromJson(message["payload"]["targets"]);
+            updateTargetsFromJson(client->id, message["payload"]["targets"]);
             return;
         }
 
@@ -369,7 +462,7 @@ void handleMessage(const std::shared_ptr<BrowserClient>& client, const std::stri
             auto payload = message.find("payload");
             if (payload != message.end() && payload->is_object()) {
                 auto targets = payload->find("targets");
-                if (targets != payload->end()) updateTargetsFromJson(*targets);
+                if (targets != payload->end()) updateTargetsFromJson(client->id, *targets);
             }
             return;
         }
@@ -411,6 +504,7 @@ void clientThread(std::shared_ptr<BrowserClient> client) {
         return;
     }
 
+    client->lastActivityMs = nowMs();
     {
         std::lock_guard<std::mutex> lock(g_clientsMutex);
         g_clients.push_back(client);
@@ -421,6 +515,7 @@ void clientThread(std::shared_ptr<BrowserClient> client) {
     while (g_running) {
         std::string text;
         if (!readTextFrame(client->socket, &text)) break;
+        client->lastActivityMs = nowMs();
         if (!text.empty()) handleMessage(client, text);
     }
 
@@ -466,6 +561,7 @@ void acceptLoop() {
 
         auto client = std::make_shared<BrowserClient>();
         client->socket = socket;
+        client->id = g_nextClientId.fetch_add(1);
         std::thread(clientThread, client).detach();
     }
 
@@ -474,6 +570,48 @@ void acceptLoop() {
         g_listenSocket = INVALID_SOCKET;
     }
     WSACleanup();
+}
+
+void heartbeatLoop() {
+    // Manifest V3 browser extensions suspend their background service worker
+    // after ~30s of WebSocket inactivity, which silently drops this connection
+    // (the extension then only recovers on its slow keepalive alarm). Sending a
+    // ping roughly every 15s counts as socket activity on the extension side and
+    // keeps its service worker alive, so the bridge stays connected instead of
+    // flapping between connected and disconnected.
+    while (g_running) {
+        for (int i = 0; i < 15 && g_running; ++i) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
+        if (!g_running) break;
+
+        auto clients = clientsSnapshot();
+        if (clients.empty()) continue;
+
+        json ping;
+        ping["id"] = nextMessageId();
+        ping["type"] = "ping";
+        ping["payload"] = json::object();
+        const std::string text = ping.dump();
+
+        const long long now = nowMs();
+        for (const auto& client : clients) {
+            if (!sendTextFrame(client, text)) {
+                // The socket is dead; unblock its reader thread so it removes the
+                // client and cleans up (it will perform the actual closesocket).
+                shutdown(client->socket, SD_BOTH);
+                continue;
+            }
+            // A live extension replies to this ping and also sends its own ping
+            // every ~20s, so activity should be well under 40s. If nothing has
+            // arrived, the extension's service worker is gone even though TCP still
+            // looks connected (a half-open zombie) — force the reader to drop it so
+            // stale clients do not linger in the client list or mislead routing.
+            if (now - client->lastActivityMs.load() > 40000) {
+                shutdown(client->socket, SD_BOTH);
+            }
+        }
+    }
 }
 
 const char* commandName(MediaCommand command) {
@@ -489,10 +627,32 @@ const char* commandName(MediaCommand command) {
     }
 }
 
-BridgeResult sendBridgeRequest(const std::string& type, const json& payload, int timeoutMs = 1800) {
-    BridgeResult result;
+// Resolve the single client that should receive a command for this target. The
+// extension that reported the target owns it; falling back to the sole client
+// when the owner is unknown. Broadcasting to every client is deliberately avoided
+// so a non-owning browser cannot toggle an unrelated tab or race the response.
+std::shared_ptr<BrowserClient> resolveTargetClient(const std::wstring& targetId) {
+    if (std::shared_ptr<BrowserClient> owner = clientById(ownerForTarget(targetId))) {
+        return owner;
+    }
+
+    // Owner unknown (stale target cache): refresh once and retry.
+    sendRequestTargets();
+    {
+        std::unique_lock<std::mutex> lock(g_targetsMutex);
+        g_targetsChanged.wait_for(lock, std::chrono::milliseconds(600));
+    }
+    if (std::shared_ptr<BrowserClient> owner = clientById(ownerForTarget(targetId))) {
+        return owner;
+    }
+
     std::vector<std::shared_ptr<BrowserClient>> clients = clientsSnapshot();
-    if (clients.empty()) return result;
+    return clients.size() == 1 ? clients.front() : nullptr;
+}
+
+BridgeResult sendBridgeRequest(const std::shared_ptr<BrowserClient>& client, const std::string& type, const json& payload, int timeoutMs = 1800) {
+    BridgeResult result;
+    if (!client) return result;
 
     const std::string requestId = nextMessageId();
     auto pending = std::make_shared<PendingResponse>();
@@ -507,9 +667,7 @@ BridgeResult sendBridgeRequest(const std::string& type, const json& payload, int
     request["payload"] = payload;
 
     std::string text = request.dump();
-    for (const auto& client : clients) {
-        if (sendTextFrame(client, text)) result.sent = true;
-    }
+    if (sendTextFrame(client, text)) result.sent = true;
 
     if (!result.sent) {
         std::lock_guard<std::mutex> lock(g_pendingMutex);
@@ -566,7 +724,7 @@ bool activateBrowserTargetForTrustedKey(const std::wstring& targetId, std::strin
         {"targetId", wideToUtf8(targetId)},
         {"restoreAfterMs", 750}
     };
-    BridgeResult result = sendBridgeRequest("activate_target", payload, 1200);
+    BridgeResult result = sendBridgeRequest(resolveTargetClient(targetId), "activate_target", payload, 1200);
     if (detail) *detail = result.detail;
     return result.sent && result.gotResponse && result.ok;
 }
@@ -577,6 +735,7 @@ void startBrowserMediaBridge(unsigned short port) {
     if (g_running.exchange(true)) return;
     g_port = port;
     g_acceptThread = std::thread(acceptLoop);
+    g_heartbeatThread = std::thread(heartbeatLoop);
 }
 
 void stopBrowserMediaBridge() {
@@ -596,6 +755,7 @@ void stopBrowserMediaBridge() {
     }
 
     if (g_acceptThread.joinable()) g_acceptThread.join();
+    if (g_heartbeatThread.joinable()) g_heartbeatThread.join();
 }
 
 std::vector<MediaTarget> listBrowserMediaTargets(std::wstring* report) {
@@ -633,14 +793,16 @@ std::vector<MediaTarget> cachedBrowserMediaTargets(std::wstring* report) {
     }
 
     std::lock_guard<std::mutex> lock(g_targetsMutex);
+    if (clients.empty()) {
+        g_targets.clear();
+        if (report) *report = L"Browser bridge has no connected extension.";
+        return {};
+    }
+
     if (report) {
-        if (clients.empty()) {
-            *report = L"Browser bridge has no connected extension.";
-        } else {
-            *report = L"Browser bridge cached targets: " + std::to_wstring(g_targets.size())
-                + L" from " + std::to_wstring(clients.size()) + L" connected extension"
-                + (clients.size() == 1 ? L"." : L"s.");
-        }
+        *report = L"Browser bridge cached targets: " + std::to_wstring(g_targets.size())
+            + L" from " + std::to_wstring(clients.size()) + L" connected extension"
+            + (clients.size() == 1 ? L"." : L"s.");
     }
     return g_targets;
 }
@@ -661,7 +823,7 @@ bool controlBrowserMediaTarget(const std::wstring& targetId, MediaCommand comman
         {"command", commandName(command)}
     };
 
-    BridgeResult domResult = sendBridgeRequest("control_media", payload);
+    BridgeResult domResult = sendBridgeRequest(resolveTargetClient(targetId), "control_media", payload);
     bool ok = domResult.sent && domResult.gotResponse && domResult.ok;
 
     if (report) {
@@ -687,12 +849,54 @@ bool controlBrowserMediaTarget(const std::wstring& targetId, MediaCommand comman
     return ok;
 }
 
+bool sendSystemMediaKey(MediaCommand command, std::wstring* report) {
+    bool ok = sendTrustedMediaKey(command);
+
+    if (report) {
+        if (ok) {
+            switch (command) {
+            case MediaCommand::Next:
+                *report = L"Sent Windows media next key.";
+                break;
+            case MediaCommand::Previous:
+                *report = L"Sent Windows media previous key.";
+                break;
+            case MediaCommand::TogglePlayPause:
+                *report = L"Sent Windows media play/pause key.";
+                break;
+            }
+        } else {
+            *report = L"Could not send Windows media key.";
+        }
+    }
+    return ok;
+}
+
 std::wstring describeBrowserBridgeStatus() {
-    std::lock_guard<std::mutex> clientsLock(g_clientsMutex);
+    std::vector<std::shared_ptr<BrowserClient>> clients = clientsSnapshot();
+
+    if (clients.empty()) {
+        std::lock_guard<std::mutex> targetsLock(g_targetsMutex);
+        g_targets.clear();
+    } else {
+        unsigned long long startRevision = 0;
+        {
+            std::lock_guard<std::mutex> targetsLock(g_targetsMutex);
+            startRevision = g_targetsRevision;
+        }
+
+        sendRequestTargets();
+
+        std::unique_lock<std::mutex> targetsLock(g_targetsMutex);
+        g_targetsChanged.wait_for(targetsLock, std::chrono::milliseconds(900), [&] {
+            return g_targetsRevision != startRevision;
+        });
+    }
+
     std::lock_guard<std::mutex> targetsLock(g_targetsMutex);
 
     std::wstringstream out;
-    out << L"browser bridge clients: " << g_clients.size() << L"\n";
+    out << L"browser bridge clients: " << clients.size() << L"\n";
     out << L"browser targets: " << g_targets.size() << L"\n";
     return out.str();
 }

@@ -1,7 +1,43 @@
 (() => {
-  if (window.__hotkeydMedia) return;
+  const TTL_MS = 30000;
+
+  if (window.__hotkeydMedia?.renew) {
+    window.__hotkeydMedia.renew(TTL_MS);
+    return;
+  }
 
   const store = Object.create(null);
+  let uninstallTimer;
+
+  const proto =
+    (window.MediaSession && window.MediaSession.prototype)
+    || (navigator.mediaSession && Object.getPrototypeOf(navigator.mediaSession));
+
+  if (!proto || typeof proto.setActionHandler !== "function") return;
+  if (proto.setActionHandler.__hotkeydWrapped) return;
+
+  const original = proto.setActionHandler;
+
+  function renew(ms = TTL_MS) {
+    if (uninstallTimer) clearTimeout(uninstallTimer);
+    uninstallTimer = setTimeout(uninstall, ms);
+  }
+
+  function uninstall() {
+    if (uninstallTimer) clearTimeout(uninstallTimer);
+    uninstallTimer = undefined;
+
+    try {
+      if (proto.setActionHandler === wrapped) proto.setActionHandler = original;
+    } catch {
+    }
+
+    try {
+      delete window.__hotkeydMedia;
+    } catch {
+      window.__hotkeydMedia = undefined;
+    }
+  }
 
   const api = {
     has(action) {
@@ -15,27 +51,16 @@
       if (typeof fn !== "function") return { ok: false, reason: "no-handler", action };
       try {
         fn({ action });
+        renew();
         return { ok: true, action };
       } catch (error) {
         return { ok: false, reason: "threw", error: String(error), action };
       }
-    }
+    },
+    renew,
+    uninstall
   };
 
-  try {
-    Object.defineProperty(window, "__hotkeydMedia", { value: api });
-  } catch {
-    window.__hotkeydMedia = api;
-  }
-
-  const proto =
-    (window.MediaSession && window.MediaSession.prototype)
-    || (navigator.mediaSession && Object.getPrototypeOf(navigator.mediaSession));
-
-  if (!proto || typeof proto.setActionHandler !== "function") return;
-  if (proto.setActionHandler.__hotkeydWrapped) return;
-
-  const original = proto.setActionHandler;
   const wrapped = function (action, handler) {
     try {
       if (handler == null) delete store[action];
@@ -49,5 +74,16 @@
     Object.defineProperty(wrapped, "__hotkeydWrapped", { value: true });
   } catch {
   }
+
+  try {
+    Object.defineProperty(window, "__hotkeydMedia", {
+      configurable: true,
+      value: api
+    });
+  } catch {
+    window.__hotkeydMedia = api;
+  }
+
   proto.setActionHandler = wrapped;
+  renew();
 })();

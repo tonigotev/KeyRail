@@ -43,6 +43,35 @@ static LRESULT CALLBACK pushToTalkOverlayProc(HWND hwnd, UINT message, WPARAM wP
     return DefWindowProcW(hwnd, message, wParam, lParam);
 }
 
+static RECT foregroundOverlayBounds() {
+    HWND foreground = GetForegroundWindow();
+    HMONITOR monitor = foreground ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST) : nullptr;
+    if (!monitor) {
+        POINT cursor{};
+        GetCursorPos(&cursor);
+        monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    }
+
+    MONITORINFO info{};
+    info.cbSize = sizeof(info);
+    if (!monitor || !GetMonitorInfoW(monitor, &info)) {
+        return RECT{0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
+    }
+
+    if (foreground) {
+        RECT foregroundRect{};
+        if (GetWindowRect(foreground, &foregroundRect)) {
+            const bool coversMonitor =
+                foregroundRect.left <= info.rcMonitor.left + 2
+                && foregroundRect.top <= info.rcMonitor.top + 2
+                && foregroundRect.right >= info.rcMonitor.right - 2
+                && foregroundRect.bottom >= info.rcMonitor.bottom - 2;
+            if (coversMonitor) return info.rcMonitor;
+        }
+    }
+    return info.rcWork;
+}
+
 HotkeyRegistry::~HotkeyRegistry() {
     clear();
 }
@@ -412,10 +441,7 @@ bool HotkeyRegistry::ensurePushToTalkOverlay() {
         return false;
     }
 
-    RECT work{};
-    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
-        work = {0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)};
-    }
+    RECT work = foregroundOverlayBounds();
 
     const int width = 22;
     const int height = 22;
@@ -440,6 +466,9 @@ bool HotkeyRegistry::ensurePushToTalkOverlay() {
 
     SetLayeredWindowAttributes(pushToTalkOverlayWindow_, RGB(255, 0, 255), 255, LWA_COLORKEY | LWA_ALPHA);
     ShowWindow(pushToTalkOverlayWindow_, SW_SHOWNOACTIVATE);
+    BringWindowToTop(pushToTalkOverlayWindow_);
+    SetWindowPos(pushToTalkOverlayWindow_, HWND_TOPMOST, x, y, width, height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
     UpdateWindow(pushToTalkOverlayWindow_);
     return true;
 }
@@ -453,6 +482,13 @@ void HotkeyRegistry::destroyPushToTalkOverlay() {
 void HotkeyRegistry::updatePushToTalkOverlay(bool muted) {
     (void)muted;
     if (!pushToTalkOverlayWindow_) return;
+    RECT work = foregroundOverlayBounds();
+    const int width = 22;
+    const int height = 22;
+    const int x = work.right - width - 18;
+    const int y = work.bottom - height - 18;
+    SetWindowPos(pushToTalkOverlayWindow_, HWND_TOPMOST, x, y, width, height,
+        SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
     InvalidateRect(pushToTalkOverlayWindow_, nullptr, TRUE);
     UpdateWindow(pushToTalkOverlayWindow_);
 }
@@ -495,18 +531,17 @@ void HotkeyRegistry::paintPushToTalkOverlay() {
 }
 
 bool HotkeyRegistry::handleKeyboardEvent(WPARAM message, const KBDLLHOOKSTRUCT& event) {
-    // Escape dismisses an open media picker or clipboard history picker. These
-    // overlays are non-activating, so we catch Esc here and swallow it so it does
-    // not also reach whatever app is focused underneath.
+    // Picker overlays are non-activating, so Escape is caught globally. Movement
+    // and paste stay configurable through normal clipboard history bindings.
     if ((message == WM_KEYDOWN || message == WM_SYSKEYDOWN)
-        && event.vkCode == VK_ESCAPE
         && (event.flags & LLKHF_INJECTED) == 0) {
-        if (mediaPickerIsOpen()) {
-            cancelMediaPicker(nullptr);
+        if (clipboardHistoryPickerIsOpen() && event.vkCode == VK_ESCAPE) {
+            cancelClipboardHistoryPicker(nullptr);
             return true;
         }
-        if (clipboardHistoryPickerIsOpen()) {
-            cancelClipboardHistoryPicker(nullptr);
+
+        if (mediaPickerIsOpen() && event.vkCode == VK_ESCAPE) {
+            cancelMediaPicker(nullptr);
             return true;
         }
     }

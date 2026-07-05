@@ -22,7 +22,7 @@ add_executable(hotkeyd
 
 target_compile_definitions(hotkeyd PRIVATE NOMINMAX UNICODE _UNICODE)
 target_include_directories(hotkeyd PRIVATE external)
-target_link_libraries(hotkeyd PRIVATE bcrypt gdi32 gdiplus ole32 runtimeobject user32 windowsapp windowscodecs ws2_32)
+target_link_libraries(hotkeyd PRIVATE bcrypt gdi32 gdiplus ole32 runtimeobject user32 version windowsapp windowscodecs ws2_32)
 
 add_executable(media_list
     src/browser_bridge.cpp

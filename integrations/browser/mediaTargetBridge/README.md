@@ -49,10 +49,12 @@ Message shape:
 }
 ```
 
-The extension also installs `ms-capture.js` as a static MAIN-world
-`document_start` content script. It wraps `MediaSession.setActionHandler` so the
-bridge can call captured `nexttrack` / `previoustrack` handlers on the selected
-tab before falling back to site buttons or normal YouTube video-only history.
+The extension keeps page interaction shallow by default: it scans media state on
+demand and uses site controls for next/previous. If those controls fail, it can
+inject `ms-capture.js` into the selected tab/frame as a temporary fallback. That
+late helper wraps `MediaSession.setActionHandler` for a short window, then
+restores the original function. It is not installed at page start, because some
+sites rely on very sensitive player boot code.
 
 The response uses the same `id`:
 
