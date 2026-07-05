@@ -6,12 +6,16 @@
 
 #include <nlohmann/json.hpp>
 
+#include <sddl.h>
+
 #include <string>
 #include <utility>
 
 using nlohmann::json;
 
 static constexpr wchar_t kPipeName[] = L"\\\\.\\pipe\\hotkeyd-control";
+static constexpr wchar_t kPipeSecurity[] =
+    L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;IU)S:(ML;;NW;;;LW)";
 
 static std::string wideToUtf8(const std::wstring& value) {
     if (value.empty()) return {};
@@ -22,6 +26,33 @@ static std::string wideToUtf8(const std::wstring& value) {
     out.pop_back();
     return out;
 }
+
+class LocalSecurityDescriptor {
+public:
+    LocalSecurityDescriptor() {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            kPipeSecurity,
+            SDDL_REVISION_1,
+            &descriptor_,
+            nullptr);
+    }
+
+    ~LocalSecurityDescriptor() {
+        if (descriptor_) LocalFree(descriptor_);
+    }
+
+    SECURITY_ATTRIBUTES* attributes() {
+        if (!descriptor_) return nullptr;
+        attributes_.nLength = sizeof(attributes_);
+        attributes_.lpSecurityDescriptor = descriptor_;
+        attributes_.bInheritHandle = FALSE;
+        return &attributes_;
+    }
+
+private:
+    PSECURITY_DESCRIPTOR descriptor_ = nullptr;
+    SECURITY_ATTRIBUTES attributes_{};
+};
 
 ControlPipe::ControlPipe(DWORD targetThreadId, UINT reloadMessage, UINT quitMessage, UINT suspendMessage, UINT resumeMessage, StatusProvider statusProvider)
     : targetThreadId_(targetThreadId),
@@ -122,6 +153,7 @@ std::string ControlPipe::dispatchCommand(const std::string& body) {
 
 void ControlPipe::run() {
     while (running_) {
+        LocalSecurityDescriptor security;
         HANDLE pipe = CreateNamedPipeW(
             kPipeName,
             PIPE_ACCESS_DUPLEX,
@@ -130,7 +162,19 @@ void ControlPipe::run() {
             4096,
             4096,
             0,
-            nullptr);
+            security.attributes());
+
+        if (pipe == INVALID_HANDLE_VALUE && security.attributes()) {
+            pipe = CreateNamedPipeW(
+                kPipeName,
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                1,
+                4096,
+                4096,
+                0,
+                nullptr);
+        }
 
         if (pipe == INVALID_HANDLE_VALUE) {
             Sleep(500);

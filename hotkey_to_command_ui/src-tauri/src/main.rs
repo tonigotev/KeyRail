@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(windows)]
@@ -757,6 +757,32 @@ fn send_pipe_raw(command: &str) -> Result<String, String> {
     Err(last_error)
 }
 
+#[cfg(windows)]
+fn wait_for_daemon_pipe_down(timeout: Duration) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if send_pipe_raw("status").is_err() {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    send_pipe_raw("status").is_err()
+}
+
+#[cfg(windows)]
+fn wait_for_daemon_pipe_status(timeout: Duration, needle: &str) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if let Ok(status) = send_pipe_raw("status") {
+            if status.to_ascii_lowercase().contains(needle) {
+                return true;
+            }
+        }
+        thread::sleep(Duration::from_millis(150));
+    }
+    false
+}
+
 #[cfg(not(windows))]
 fn send_pipe_raw(_command: &str) -> Result<String, String> {
     Err("daemon control pipe is Windows-only".to_string())
@@ -859,8 +885,17 @@ fn restart_daemon_as_admin() -> Result<(), String> {
     #[cfg(windows)]
     {
         let daemon = startup_daemon_path()?;
-        let _ = send_pipe_raw("quit");
-        thread::sleep(Duration::from_millis(250));
+
+        if send_pipe_raw("status").is_ok() {
+            let _ = send_pipe_raw("quit");
+            if !wait_for_daemon_pipe_down(Duration::from_secs(6)) {
+                return Err(
+                    "the existing daemon did not stop, so administrator restart was cancelled"
+                        .to_string(),
+                );
+            }
+        }
+
         let script = format!(
             "Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden",
             daemon.display().to_string().replace('\'', "''")
@@ -870,6 +905,8 @@ fn restart_daemon_as_admin() -> Result<(), String> {
             .creation_flags(0x08000000)
             .spawn()
             .map_err(|error| error.to_string())?;
+
+        let _ = wait_for_daemon_pipe_status(Duration::from_secs(8), "daemon elevated: yes");
         Ok(())
     }
 
