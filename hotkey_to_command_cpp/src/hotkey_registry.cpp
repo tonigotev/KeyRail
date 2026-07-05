@@ -17,6 +17,7 @@
 
 static HotkeyRegistry* g_keyboardHookRegistry = nullptr;
 static const wchar_t* kPushToTalkOverlayClass = L"HotkeyToCommandPushToTalkOverlay";
+static constexpr DWORD kDuplicateBackendWindowMs = 120;
 
 static LRESULT CALLBACK keyboardHookProc(int code, WPARAM wParam, LPARAM lParam) {
     if (code == HC_ACTION && g_keyboardHookRegistry && lParam) {
@@ -96,13 +97,18 @@ void HotkeyRegistry::clear() {
     dispatch_.clear();
     actions_.clear();
     hotkeyVk_.clear();
+    hotkeyComboKeys_.clear();
     hotkeyLabels_.clear();
     hotkeyPretty_.clear();
     preparedBindings_.clear();
     pushToTalkBindings_.clear();
+    rawPressedKeys_.clear();
+    lastDispatchTick_.clear();
     pushToTalkOverlayEnabled_ = false;
     commandMode_ = false;
     commandActive_ = false;
+    commandActivationComboReady_ = false;
+    commandActivationCombo_ = {};
     commandActivationId_ = 0;
 }
 
@@ -221,22 +227,27 @@ std::wstring HotkeyRegistry::apply(const AppConfig& config) {
         }
 
         commandActivationId_ = nextId++;
+        commandActivationCombo_ = activation;
+        commandActivationComboReady_ = true;
         if (!RegisterHotKey(nullptr, commandActivationId_, activation.mods | MOD_NOREPEAT, activation.vk)) {
             DWORD error = GetLastError();
-            status << L"command mode disabled: launcher "
+            status << L"command mode launcher raw-only: "
+                   << activation.pretty << L" (RegisterHotKey "
                    << (error == ERROR_HOTKEY_ALREADY_REGISTERED ? L"already in use" : L"register failed")
-                   << L"\n";
+                   << L")\n";
             commandActivationId_ = 0;
-            return status.str();
+        } else {
+            registeredIds_.push_back(commandActivationId_);
+            hotkeyVk_[commandActivationId_] = activation.vk;
+            hotkeyComboKeys_[commandActivationId_] = activation.key();
+            hotkeyLabels_[commandActivationId_] = L"command mode launcher";
+            hotkeyPretty_[commandActivationId_] = activation.pretty;
+            status << L"command mode launcher " << activation.pretty << L"\n";
         }
 
-        registeredIds_.push_back(commandActivationId_);
-        hotkeyVk_[commandActivationId_] = activation.vk;
-        hotkeyLabels_[commandActivationId_] = L"command mode launcher";
-        hotkeyPretty_[commandActivationId_] = activation.pretty;
-        status << L"command mode launcher " << activation.pretty << L"\n";
         status << L"ready bindings: " << preparedBindings_.size() << L"\n";
         status << L"timeout: " << commandTimeoutMs_ << L"ms\n";
+        status << L"raw input fallback ready: command launcher + " << preparedBindings_.size() << L" bindings\n";
         return status.str();
     }
 
@@ -244,14 +255,16 @@ std::wstring HotkeyRegistry::apply(const AppConfig& config) {
         int id = nextId++;
         if (!RegisterHotKey(nullptr, id, prepared.combo.mods | MOD_NOREPEAT, prepared.combo.vk)) {
             DWORD error = GetLastError();
-            status << L"skip " << prepared.label << L": "
+            status << L"raw-only " << prepared.combo.pretty << L" -> " << prepared.label
+                   << L" (RegisterHotKey "
                    << (error == ERROR_HOTKEY_ALREADY_REGISTERED ? L"already in use" : L"register failed")
-                   << L"\n";
+                   << L")\n";
             continue;
         }
 
         dispatch_[id] = prepared.action;
         hotkeyVk_[id] = prepared.combo.vk;
+        hotkeyComboKeys_[id] = prepared.combo.key();
         hotkeyLabels_[id] = prepared.label;
         hotkeyPretty_[id] = prepared.combo.pretty;
         registeredIds_.push_back(id);
@@ -261,6 +274,7 @@ std::wstring HotkeyRegistry::apply(const AppConfig& config) {
     }
 
     if (armed == 0) status << L"no hotkeys armed\n";
+    status << L"raw input fallback ready: " << preparedBindings_.size() << L" bindings\n";
     return status.str();
 }
 
@@ -276,6 +290,85 @@ bool HotkeyRegistry::runAction(Runnable* action) const {
         }
     }).detach();
     return true;
+}
+
+bool HotkeyRegistry::shouldDispatchCombo(const HotkeyCombo& combo) {
+    const unsigned long long key = combo.key();
+    const DWORD now = GetTickCount();
+    auto previous = lastDispatchTick_.find(key);
+    if (previous != lastDispatchTick_.end()
+        && static_cast<DWORD>(now - previous->second) < kDuplicateBackendWindowMs) {
+        return false;
+    }
+
+    lastDispatchTick_[key] = now;
+    return true;
+}
+
+bool HotkeyRegistry::dispatchPrepared(const PreparedBinding& prepared, const wchar_t* source, HANDLE device) {
+    if (!shouldDispatchCombo(prepared.combo)) return true;
+
+    if (commandMode_ && commandActive_) {
+        resetCommandTimer();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(eventMutex_);
+        ++eventCounter_;
+        lastEvent_ = L"last hotkey: " + prepared.combo.pretty + L" -> " + prepared.label
+            + L" #" + std::to_wstring(eventCounter_) + L" via " + source;
+        if (device) {
+            lastEvent_ += L" device=0x";
+            wchar_t buffer[32]{};
+            swprintf_s(buffer, L"%p", device);
+            lastEvent_ += buffer;
+        }
+    }
+
+    return runAction(prepared.action);
+}
+
+bool HotkeyRegistry::dispatchRawKey(UINT vk, bool pressed, HANDLE device) {
+    auto clearPressed = [&](const HotkeyCombo& combo) {
+        if (combo.vk == vk) rawPressedKeys_.erase(combo.key());
+    };
+
+    if (!pressed) {
+        if (commandActivationComboReady_) clearPressed(commandActivationCombo_);
+        for (const auto& prepared : preparedBindings_) clearPressed(prepared.combo);
+        return false;
+    }
+
+    if (commandMode_ && commandActivationComboReady_
+        && commandActivationCombo_.vk == vk
+        && comboModifiersDown(commandActivationCombo_.mods)) {
+        const unsigned long long key = commandActivationCombo_.key();
+        if (rawPressedKeys_.insert(key).second) {
+            if (!shouldDispatchCombo(commandActivationCombo_)) return true;
+            {
+                std::lock_guard<std::mutex> lock(eventMutex_);
+                ++eventCounter_;
+                lastEvent_ = L"last hotkey: " + commandActivationCombo_.pretty
+                    + L" -> command mode launcher #" + std::to_wstring(eventCounter_)
+                    + L" via raw input";
+            }
+            return activateCommandMode();
+        }
+        return true;
+    }
+
+    if (commandMode_ && !commandActive_) return false;
+
+    for (const auto& prepared : preparedBindings_) {
+        if (prepared.combo.vk != vk) continue;
+        if (!comboModifiersDown(prepared.combo.mods)) continue;
+
+        const unsigned long long key = prepared.combo.key();
+        if (!rawPressedKeys_.insert(key).second) return true;
+        return dispatchPrepared(prepared, L"raw input", device);
+    }
+
+    return false;
 }
 
 bool HotkeyRegistry::activateCommandMode() {
@@ -297,6 +390,7 @@ bool HotkeyRegistry::activateCommandMode() {
         temporaryIds_.push_back(id);
         dispatch_[id] = prepared.action;
         hotkeyVk_[id] = prepared.combo.vk;
+        hotkeyComboKeys_[id] = prepared.combo.key();
         hotkeyLabels_[id] = prepared.label;
         hotkeyPretty_[id] = prepared.combo.pretty;
         ++armed;
@@ -343,6 +437,13 @@ void HotkeyRegistry::deactivateCommandMode() {
     for (auto it = hotkeyLabels_.begin(); it != hotkeyLabels_.end();) {
         if (it->first >= 10000) {
             it = hotkeyLabels_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = hotkeyComboKeys_.begin(); it != hotkeyComboKeys_.end();) {
+        if (it->first >= 10000) {
+            it = hotkeyComboKeys_.erase(it);
         } else {
             ++it;
         }
@@ -618,10 +719,15 @@ bool HotkeyRegistry::dispatch(WPARAM hotkeyId) {
     }
 
     if (commandMode_ && id == commandActivationId_) {
+        if (hotkeyComboKeys_.count(id)) {
+            HotkeyCombo combo = commandActivationCombo_;
+            combo.vk = hotkeyVk_[id];
+            if (!shouldDispatchCombo(combo)) return true;
+        }
         {
             std::lock_guard<std::mutex> lock(eventMutex_);
             ++eventCounter_;
-            lastEvent_ = L"last hotkey: " + hotkeyPretty_[id] + L" -> command mode launcher #" + std::to_wstring(eventCounter_);
+            lastEvent_ = L"last hotkey: " + hotkeyPretty_[id] + L" -> command mode launcher #" + std::to_wstring(eventCounter_) + L" via RegisterHotKey";
         }
         return activateCommandMode();
     }
@@ -630,15 +736,23 @@ bool HotkeyRegistry::dispatch(WPARAM hotkeyId) {
     if (it == dispatch_.end()) return false;
 
     Runnable* action = it->second;
-    if (commandMode_ && commandActive_) {
-        resetCommandTimer();
+    HotkeyCombo combo;
+    combo.ok = true;
+    combo.vk = hotkeyVk_.count(id) ? hotkeyVk_[id] : 0;
+    combo.pretty = hotkeyPretty_.count(id) ? hotkeyPretty_[id] : L"unknown";
+    if (hotkeyComboKeys_.count(id)) {
+        combo.mods = static_cast<UINT>(hotkeyComboKeys_[id] >> 32);
+        if (!shouldDispatchCombo(combo)) return true;
     }
+
+    if (commandMode_ && commandActive_) resetCommandTimer();
+
     {
         std::lock_guard<std::mutex> lock(eventMutex_);
         ++eventCounter_;
         std::wstring pretty = hotkeyPretty_.count(id) ? hotkeyPretty_[id] : L"unknown";
         std::wstring label = hotkeyLabels_.count(id) ? hotkeyLabels_[id] : L"binding";
-        lastEvent_ = L"last hotkey: " + pretty + L" -> " + label + L" #" + std::to_wstring(eventCounter_);
+        lastEvent_ = L"last hotkey: " + pretty + L" -> " + label + L" #" + std::to_wstring(eventCounter_) + L" via RegisterHotKey";
     }
     return runAction(action);
 }

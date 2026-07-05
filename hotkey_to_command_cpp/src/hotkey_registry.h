@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <windows.h>
 
@@ -31,6 +32,7 @@ public:
 
     std::wstring apply(const AppConfig& config);
     bool dispatch(WPARAM hotkeyId);
+    bool dispatchRawKey(UINT vk, bool pressed, HANDLE device);
     bool handleTimer(WPARAM timerId);
     bool handleKeyboardEvent(WPARAM message, const KBDLLHOOKSTRUCT& event);
     std::wstring lastEvent() const;
@@ -40,6 +42,8 @@ public:
 private:
     void clearRegisteredIds(std::vector<int>& ids);
     bool runAction(Runnable* action) const;
+    bool shouldDispatchCombo(const HotkeyCombo& combo);
+    bool dispatchPrepared(const PreparedBinding& prepared, const wchar_t* source, HANDLE device);
     bool activateCommandMode();
     void resetCommandTimer();
     void deactivateCommandMode();
@@ -56,6 +60,7 @@ private:
     std::vector<std::unique_ptr<Runnable>> actions_;
     std::unordered_map<int, Runnable*> dispatch_;
     std::unordered_map<int, UINT> hotkeyVk_;
+    std::unordered_map<int, unsigned long long> hotkeyComboKeys_;
     std::unordered_map<int, std::wstring> hotkeyLabels_;
     std::unordered_map<int, std::wstring> hotkeyPretty_;
     std::vector<PreparedBinding> preparedBindings_;
@@ -70,8 +75,12 @@ private:
     mutable std::mutex eventMutex_;
     std::wstring lastEvent_;
     unsigned long long eventCounter_ = 0;
+    std::unordered_set<unsigned long long> rawPressedKeys_;
+    std::unordered_map<unsigned long long, DWORD> lastDispatchTick_;
     bool commandMode_ = false;
     bool commandActive_ = false;
+    bool commandActivationComboReady_ = false;
+    HotkeyCombo commandActivationCombo_;
     int commandActivationId_ = 0;
     UINT_PTR commandTimerId_ = 0;
     int commandTimeoutMs_ = 4000;
