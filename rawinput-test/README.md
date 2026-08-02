@@ -1,4 +1,4 @@
-# Raw Input Keyboard Detector
+﻿# Raw Input Keyboard Detector
 
 Small standalone Win32 proof of concept that observes keyboard input using only
 the Raw Input API (`WM_INPUT`). It creates a message-only window, registers for
@@ -13,7 +13,7 @@ another app, such as a game, is focused.
 Open **Developer PowerShell for VS 2022**, then run:
 
 ```powershell
-cd "C:\Users\boris\Documents\hotkeys stuff\rawinput-test"
+cd rawinput-test
 cl /EHsc /W4 /DUNICODE /D_UNICODE main.cpp /Fe:rawinput-test.exe user32.lib
 ```
 
@@ -21,7 +21,7 @@ If you are in normal PowerShell and `cl` says it is not recognized, run the
 same build through Visual Studio's environment script:
 
 ```powershell
-cd "C:\Users\boris\Documents\hotkeys stuff\rawinput-test"
+cd rawinput-test
 cmd /c "`"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`" && cl /EHsc /W4 /DUNICODE /D_UNICODE main.cpp /Fe:rawinput-test.exe user32.lib"
 ```
 
@@ -30,7 +30,7 @@ cmd /c "`"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\B
 From a shell where `g++` is available:
 
 ```powershell
-cd "C:\Users\boris\Documents\hotkeys stuff\rawinput-test"
+cd rawinput-test
 g++ -std=c++17 -Wall -Wextra main.cpp -o rawinput-test.exe -luser32
 ```
 
@@ -84,3 +84,4 @@ this background process. Stop with `Ctrl+C`.
 - Does not use `RegisterHotKey`.
 - Does not use `SendInput`.
 - Does not inject into or modify any other process.
+

@@ -33,6 +33,27 @@
       "icons/icon-256.png",
       "icons/icon-512.png"
     ],
-    "externalBin": []
+    "externalBin": [],
+    "resources": {
+      "../../integrations/browser/mediaTargetBridge": "integrations/browser/mediaTargetBridge",
+      "../../integrations/vencord/outputDeviceBridge": "integrations/vencord/outputDeviceBridge",
+      "binaries/hotkeyd.exe": "hotkeyd.exe",
+      "binaries/media_list.exe": "media_list.exe"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "Hotkey To Command",
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "headerImage": "installer/header.bmp",
+        "sidebarImage": "installer/sidebar.bmp",
+        "installerHooks": "installer/hooks.nsh",
+        "compression": "lzma"
+      }
+    }
   }
 }

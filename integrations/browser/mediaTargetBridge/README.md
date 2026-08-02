@@ -1,4 +1,4 @@
-# Hotkey To Command Media Bridge
+﻿# Hotkey To Command Media Bridge
 
 Browser extension bridge for listing and controlling media inside Brave/Chrome tabs.
 
@@ -10,7 +10,7 @@ Browser extension bridge for listing and controlling media inside Brave/Chrome t
 4. Click **Load unpacked**.
 5. Select this folder:
 
-   `C:\Users\boris\Documents\hotkeys stuff\integrations\browser\mediaTargetBridge`
+   `integrations\browser\mediaTargetBridge` inside your clone
 
 6. Open or refresh media tabs.
 7. Start the daemon or run `media_list.exe` to inspect detected targets.
@@ -68,3 +68,4 @@ The response uses the same `id`:
   }
 }
 ```
+

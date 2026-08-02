@@ -1,5 +1,8 @@
 #include "clipboard_history.h"
 
+#include "display_state.h"
+#include "synthetic_hotkey_suppression.h"
+
 #include <windows.h>
 #include <windowsx.h>
 
@@ -619,18 +622,19 @@ POINT pickerPositionForSize(int width, int height) {
     return POINT{x, y};
 }
 
+// No BringWindowToTop or SetForegroundWindow: activating the picker is what
+// knocks a fullscreen game out of exclusive mode and minimizes it. SWP_NOACTIVATE
+// changes z-order only, leaving the foreground window alone.
 void showPickerTopmost(HWND hwnd, int x, int y, int width, int height) {
-    constexpr UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER;
+    constexpr UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    BringWindowToTop(hwnd);
-    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags | SWP_NOSENDCHANGING);
 }
 
 void pulsePickerTopmost(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return;
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
 }
 
 // ---- shared chrome ----------------------------------------------------------
@@ -1023,8 +1027,12 @@ bool copySelected(std::wstring* report) {
     return ok;
 }
 
-// Synthesize Ctrl+V into whatever window currently has focus.
+// Synthesize Ctrl+V into whatever window currently has focus. Raw Input reports
+// injected keys too, so mark it before sending or a ctrl+v binding would fire
+// itself again.
 void sendCtrlV() {
+    suppressNextSyntheticHotkey('V', 1200);
+
     INPUT inputs[4]{};
     inputs[0].type = INPUT_KEYBOARD; inputs[0].ki.wVk = VK_CONTROL;
     inputs[1].type = INPUT_KEYBOARD; inputs[1].ki.wVk = 'V';
@@ -1106,9 +1114,10 @@ LRESULT CALLBACK clipboardWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM
         HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18);
         SetWindowRgn(hwnd, region, TRUE);
         showPickerTopmost(hwnd, position.x, position.y, width, height);
+        noteOverlayShown(L"clipboard history picker");
         InvalidateRect(hwnd, nullptr, FALSE);
         SetTimer(hwnd, kPickerTimer, static_cast<UINT>(wParam == 0 ? kPickerOpenMs : wParam), nullptr);
-        SetTimer(hwnd, kTopmostPulseTimer, 80, nullptr);
+        SetTimer(hwnd, kTopmostPulseTimer, 250, nullptr);
         g_mouseTracking = false;
         startHoverAnimation(hwnd);
         return 0;

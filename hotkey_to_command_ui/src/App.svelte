@@ -1,8 +1,10 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { onMount, tick } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import appIconUrl from "./assets/hotkeytocommand-icon.svg";
+  import { guides } from "./guides";
 
   type ActionSpec =
     | { type: "builtin"; name: "cycle_audio_output" | "cycle_microphone_input" | "push_to_talk" | "push_to_mute" | "clipboard_history_open" | "clipboard_history_next" | "clipboard_history_previous" | "clipboard_history_confirm" | "clipboard_history_cancel" | "clipboard_quick_open" | "inspect_clipboard_history" | "inspect_focused_app_audio" | "cycle_focused_app_audio_output" | "cycle_focused_app_microphone_input" | "cycle_discord_output_device" | "cycle_discord_microphone_input" | "media_picker_open" | "media_picker_next" | "media_picker_previous" | "media_picker_confirm" | "media_picker_cancel" | "media_selected_play_pause" | "media_selected_next" | "media_selected_previous" | "media_next_contextual" | "media_previous_contextual" | "media_play_pause_contextual" | "inspect_media_sessions" | "close_focused_app" | "kill_focused_app"; strong_close?: boolean; ptt_overlay?: boolean }
@@ -144,7 +146,7 @@
   let advancedPulseTimer: ReturnType<typeof setTimeout> | undefined;
   let theme: ThemeName = "current";
   let searchQuery = "";
-  let activePage: "bindings" | "settings" = "bindings";
+  let activePage: "bindings" | "settings" | "setup" | "guides" = "bindings";
   let onboardingOpen = false;
   let onboardingStep = 0;
   let onboardingAnimationKey = 0;
@@ -229,13 +231,41 @@
         onboardingOpen = true;
         await enableStartupForOnboardingDefault();
       }
+
+      // A fresh install leaves a marker the installer wrote. Reading it clears
+      // it, so this opens the integration wizard once and never again.
+      try {
+        if (await invoke<boolean>("take_pending_setup")) {
+          setPage("setup");
+          logEvent("first run after install, opening setup");
+        }
+      } catch {
+        // Not fatal: the app is perfectly usable without the handoff.
+      }
     })();
     statusTimer = setInterval(() => {
       void refreshStatusQuietly();
       void refreshBrowserBridgeQuietly();
+      void refreshDiscordBridgeQuietly();
     }, 5000);
+    void refreshDiscordBridgeQuietly();
+
+    // Install steps are long, so the backend streams each one instead of the UI
+    // sitting on a single unresolved promise with no feedback.
+    const unlistenSetup = listen<SetupProgress>("setup-progress", (event) => {
+      const update = event.payload;
+      const index = setupSteps.findIndex((step) => step.step === update.step);
+      if (index >= 0) {
+        setupSteps[index] = update;
+        setupSteps = [...setupSteps];
+      } else {
+        setupSteps = [...setupSteps, update];
+      }
+    });
+
     return () => {
       if (statusTimer) clearInterval(statusTimer);
+      void unlistenSetup.then((off) => off());
     };
   });
 
@@ -246,8 +276,294 @@
     logEvent(`theme set to ${name}`);
   }
 
-  function setPage(page: "bindings" | "settings") {
+  function setPage(page: "bindings" | "settings" | "setup" | "guides") {
     activePage = page;
+    if (page === "setup" && !setupStatus && !setupDetecting) void refreshSetup();
+  }
+
+  // ---- integration setup ----------------------------------------------------
+
+  type ToolInfo = { name: string; found: boolean; version: string; install_url: string };
+  type BrowserInfo = { id: string; name: string; path: string; installed: boolean; is_default: boolean };
+  type DiscordInfo = { variant: string; path: string; running: boolean };
+  type VencordInfo = {
+    checkout_path: string;
+    checkout_ready: boolean;
+    dependencies_installed: boolean;
+    plugin_installed: boolean;
+    built: boolean;
+    injected: boolean;
+  };
+  type SetupStatus = {
+    tools: ToolInfo[];
+    browsers: BrowserInfo[];
+    default_browser: string;
+    default_browser_detail: string;
+    extension_staged_path: string;
+    extension_staged: boolean;
+    discord: DiscordInfo[];
+    vencord: VencordInfo;
+  };
+  type SetupProgress = { step: string; detail: string; done: boolean; failed: boolean };
+
+  let setupStatus: SetupStatus | null = null;
+  let setupDetecting = false;
+  let setupBusy = "";
+  let setupSteps: SetupProgress[] = [];
+  let closeDiscordDuringInstall = true;
+  let selectedBrowser = "";
+  let lastDetectedDefault = "";
+  let wizardStep = 0;
+  let discordBridgeClients = 0;
+
+  // Which actions stop working, or work worse, without an integration from
+  // Setup. Verified against the daemon rather than guessed:
+  //
+  //   browser  - media_sessions routes a selected target of kind "browser"
+  //              through controlBrowserMediaTarget. Without the extension the
+  //              picker cannot see individual tabs and skip falls back to system
+  //              media keys, which only work if the page exposes them.
+  //   discord  - action_factory calls sendDiscordBridgeCommand for the two
+  //              cycle_discord_* actions always, and for the focused-app cycles
+  //              only when the focused process is Discord.
+  const BROWSER_ACTIONS = new Set([
+    "media_picker_open",
+    "media_picker_next",
+    "media_picker_previous",
+    "media_picker_confirm",
+    "media_selected_play_pause",
+    "media_selected_next",
+    "media_selected_previous",
+    "media_next_contextual",
+    "media_previous_contextual",
+    "media_play_pause_contextual"
+  ]);
+  const DISCORD_ACTIONS = new Set([
+    "cycle_discord_output_device",
+    "cycle_discord_microphone_input"
+  ]);
+  // These only need Discord when Discord happens to be the focused app, so they
+  // are a softer note rather than a warning.
+  const DISCORD_OPTIONAL_ACTIONS = new Set([
+    "cycle_focused_app_audio_output",
+    "cycle_focused_app_microphone_input"
+  ]);
+
+  function bindingRequirement(binding: BindingSpec) {
+    if (binding.action.type !== "builtin") return null;
+    const name = binding.action.name;
+
+    if (DISCORD_ACTIONS.has(name) && discordBridgeClients === 0) {
+      return { kind: "discord", hard: true, text: "Needs the Discord bridge from Setup, or this does nothing." };
+    }
+    if (DISCORD_OPTIONAL_ACTIONS.has(name) && discordBridgeClients === 0) {
+      return { kind: "discord", hard: false, text: "Works for normal apps. Needs the Discord bridge from Setup to also work while Discord is focused." };
+    }
+    if (BROWSER_ACTIONS.has(name) && !browserBridge.connected) {
+      return { kind: "browser", hard: false, text: "Needs the browser extension from Setup to target individual tabs. Without it this falls back to system media keys." };
+    }
+    return null;
+  }
+
+  $: missingIntegrationCount = config.bindings.filter(
+    (binding) => binding.enabled && bindingRequirement(binding)
+  ).length;
+
+  const wizardStages = [
+    { id: "scan", label: "Scan" },
+    { id: "browser", label: "Browser" },
+    { id: "discord", label: "Discord" },
+    { id: "done", label: "Done" }
+  ];
+
+  // "git version 2.52.0.windows.1" and "v25.0.0" both reduce to a bare number,
+  // which is all the chip has room for.
+  function shortVersion(raw: string) {
+    const match = raw.match(/\d+\.\d+(\.\d+)?/);
+    return match ? match[0] : raw;
+  }
+
+  function goToStep(index: number) {
+    wizardStep = Math.min(Math.max(index, 0), wizardStages.length - 1);
+  }
+
+  // Tauri rejects with a plain string; anything else is a real JS error.
+  function errorText(error: unknown) {
+    if (typeof error === "string") return error;
+    if (error instanceof Error) return error.message;
+    return String(error);
+  }
+
+  $: setupTool = (name: string) => setupStatus?.tools.find((tool) => tool.name === name);
+  $: vencordToolsReady = ["git", "node", "pnpm"].every((name) => setupTool(name)?.found);
+  $: installedBrowsers = setupStatus?.browsers.filter((browser) => browser.installed) ?? [];
+  $: missingTools = setupStatus?.tools.filter((tool) => !tool.found) ?? [];
+
+  // Whether each stage's work is actually finished, checked against real state.
+  // Navigating past a stage is not the same as completing it, so the rail reads
+  // from these rather than from the step index.
+  $: stageComplete = [
+    !!setupStatus,
+    extensionLive,
+    bridgeInstalled,
+    extensionLive && bridgeInstalled
+  ];
+  // Injection is checked against Discord's own files, so "installed" means the
+  // patch is really on disk rather than the installer having exited quietly.
+  $: bridgeInstalled =
+    !!setupStatus?.vencord.plugin_installed &&
+    !!setupStatus?.vencord.built &&
+    !!setupStatus?.vencord.injected;
+  $: extensionLive = browserBridge.connected;
+
+  async function refreshSetup() {
+    setupDetecting = true;
+    try {
+      const status = await invoke<SetupStatus>("detect_setup");
+      setupStatus = status;
+
+      // Read from the fresh result, not the reactive installedBrowsers, which
+      // has not recomputed yet at this point in the same tick.
+      const available = status.browsers.filter((browser) => browser.installed);
+      const stillValid = available.some((browser) => browser.id === selectedBrowser);
+      // Re-scan exists precisely so a default changed outside the app is picked
+      // up, so the selection follows it unless the user chose something else.
+      const followDefault = !selectedBrowser || !stillValid || selectedBrowser === lastDetectedDefault;
+      if (followDefault) {
+        const preferred = available.find((browser) => browser.is_default) ?? available[0];
+        selectedBrowser = preferred?.id ?? "";
+      }
+      lastDetectedDefault = status.default_browser;
+      logEvent("setup detection finished", "info", JSON.stringify(setupStatus, null, 2));
+    } catch (error) {
+      pushToast(`Detection failed: ${errorText(error)}`, "error");
+    } finally {
+      setupDetecting = false;
+    }
+  }
+
+  async function stageExtension() {
+    setupBusy = "stage";
+    try {
+      const path = await invoke<string>("stage_browser_extension");
+      pushToast("Extension staged. Load it with Load unpacked.", "success");
+      logEvent("extension staged", "info", path);
+      await refreshSetup();
+    } catch (error) {
+      pushToast(`Could not stage the extension: ${errorText(error)}`, "error");
+    } finally {
+      setupBusy = "";
+    }
+  }
+
+  // Chromium blocks brave://, chrome:// and edge:// URLs passed on the command
+  // line, so the browser can only be brought to the front; the address itself
+  // has to be typed. extensionsUrl is shown next to the button for that.
+  $: extensionsUrl =
+    selectedBrowser === "brave"
+      ? "brave://extensions"
+      : selectedBrowser === "edge"
+        ? "edge://extensions"
+        : "chrome://extensions";
+
+  async function openSelectedBrowser() {
+    if (!selectedBrowser) return;
+    try {
+      await invoke("open_browser", { browser: selectedBrowser });
+    } catch (error) {
+      pushToast(`Could not open the browser: ${errorText(error)}`, "error");
+    }
+  }
+
+  async function copyExtensionsUrl() {
+    try {
+      await navigator.clipboard.writeText(extensionsUrl);
+      pushToast(`${extensionsUrl} copied. Paste it in the address bar.`, "success");
+    } catch {
+      pushToast("Could not copy. Type the address shown instead.", "error");
+    }
+  }
+
+  async function copyStagedPath() {
+    if (!setupStatus?.extension_staged_path) return;
+    try {
+      await navigator.clipboard.writeText(setupStatus.extension_staged_path);
+      pushToast("Folder path copied. Paste it into the Load unpacked dialog.", "success");
+    } catch {
+      pushToast("Could not copy the path. Select it from the field instead.", "error");
+    }
+  }
+
+  async function revealStagedFolder() {
+    if (!setupStatus?.extension_staged_path) return;
+    try {
+      await invoke("reveal_path", { path: setupStatus.extension_staged_path });
+    } catch (error) {
+      pushToast(`Could not open the folder: ${errorText(error)}`, "error");
+    }
+  }
+
+  async function openExternal(url: string) {
+    try {
+      await invoke("open_url", { url });
+    } catch (error) {
+      pushToast(`Could not open the link: ${errorText(error)}`, "error");
+    }
+  }
+
+  async function installPnpm() {
+    setupBusy = "pnpm";
+    setupSteps = [];
+    try {
+      const message = await invoke<string>("install_pnpm");
+      pushToast(message, "success");
+      await refreshSetup();
+    } catch (error) {
+      pushToast(`pnpm install failed: ${errorText(error)}`, "error");
+    } finally {
+      setupBusy = "";
+    }
+  }
+
+  async function refreshDiscordBridgeQuietly() {
+    try {
+      discordBridgeClients = await invoke<number>("discord_bridge_clients");
+    } catch {
+      discordBridgeClients = 0;
+    }
+  }
+
+  async function installBuildTools() {
+    setupBusy = "tools";
+    setupSteps = [];
+    try {
+      const message = await invoke<string>("install_build_tools");
+      pushToast(message, "success");
+      await refreshSetup();
+    } catch (error) {
+      pushToast(`Could not install the build tools: ${errorText(error)}`, "error");
+      logEvent("build tool install failed", "error", errorText(error));
+    } finally {
+      setupBusy = "";
+    }
+  }
+
+  async function installVencordBridge() {
+    setupBusy = "vencord";
+    setupSteps = [];
+    try {
+      const message = await invoke<string>("install_vencord_bridge", {
+        closeDiscord: closeDiscordDuringInstall
+      });
+      pushToast(message, "success");
+      logEvent("Discord bridge installed", "info", message);
+      await refreshSetup();
+    } catch (error) {
+      pushToast(`Discord bridge install failed: ${errorText(error)}`, "error");
+      logEvent("Discord bridge install failed", "error", errorText(error));
+    } finally {
+      setupBusy = "";
+    }
   }
 
   function touch() {
@@ -515,7 +831,7 @@
         refreshStatusQuietly(),
         wait(650)
       ]);
-      logEvent("status checked");
+      logEvent(daemonStatusLogLine(daemonStatus), "info", daemonStatus);
     } finally {
       daemonStatusCheckingVisual = false;
     }
@@ -1374,7 +1690,7 @@
     const key = normalizeKey(event.key);
     if (!key) return;
 
-    // Any combo is accepted here — even one already in use. Conflicts are surfaced
+    // Any combo is accepted here â€” even one already in use. Conflicts are surfaced
     // by duplicateHotkeys and block saving until resolved, so a straight swap works
     // without needing a temporary placeholder hotkey.
     binding.hotkey = [...parts, key].join("+");
@@ -1383,8 +1699,8 @@
   }
 
   async function suspendDaemonHotkeys() {
-    // Release the daemon's global hotkeys while recording so an already-bound combo
-    // reaches the recorder instead of firing its action (RegisterHotKey swallows it).
+    // Stop the daemon from matching bindings while recording, so pressing a combo
+    // that is already bound records it instead of also running its action.
     try {
       await invoke("send_daemon_command", { command: "suspend_hotkeys" });
     } catch {
@@ -1571,6 +1887,20 @@
     return "";
   }
 
+  function daemonStatusLogLine(text: string) {
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const rawIndex = lines.findIndex((line) => line.toLowerCase() === "raw input debug:");
+    if (rawIndex >= 0) {
+      const events = lines[rawIndex + 1]?.replace(/^events:\s*/i, "events ") ?? "";
+      const matches = lines[rawIndex + 2]?.replace(/^matches:\s*/i, "matches ") ?? "";
+      const lastResult = lines.find((line) => line.toLowerCase().startsWith("last result:"))?.replace(/^last result:\s*/i, "");
+      return ["raw input debug", events, matches, lastResult ? `last: ${lastResult}` : ""]
+        .filter(Boolean)
+        .join(" - ");
+    }
+    return "status checked";
+  }
+
   function summarizeStatus(lines: string[]) {
     const bindingLines = lines.filter((line) => line.includes("=>") || line.toLowerCase().includes("hotkey"));
     if (bindingLines.length === 1) return "1 binding is armed.";
@@ -1654,6 +1984,7 @@
 
       <nav class="side-nav" aria-label="Main sections">
         <button class:active={activePage === "bindings"} on:click={() => setPage("bindings")}>Bindings</button>
+        <button class:active={activePage === "setup"} on:click={() => setPage("setup")}>Setup</button>
         <button class:active={activePage === "settings"} on:click={() => setPage("settings")}>Settings</button>
       </nav>
 
@@ -1774,6 +2105,19 @@
         <div class="notice error">Duplicate enabled hotkey: {Array.from(duplicateHotkeys).join(", ")}</div>
       {/if}
 
+      {#if missingIntegrationCount > 0}
+        <div class="notice setup-notice">
+          <span>
+            {missingIntegrationCount}
+            {missingIntegrationCount === 1 ? "binding needs" : "bindings need"}
+            an integration that is not set up yet, so
+            {missingIntegrationCount === 1 ? "it will not" : "they will not"}
+            work fully.
+          </span>
+          <button class="ghost" on:click={() => setPage("setup")}>Open Setup</button>
+        </div>
+      {/if}
+
       <div class="toasts" aria-live="polite">
         {#each toasts as toast}
           <div class:error={toast.type === "error"} class:success={toast.type === "success"} class:info={toast.type === "info"} class="toast">
@@ -1795,6 +2139,16 @@
                 <button class="danger group-delete" disabled={!!busyAction} on:click={() => pendingDelete = { type: "media-group", count: visibleMediaRows.length }}>Delete</button>
               </div>
             </div>
+
+            {#if !browserBridge.connected}
+              <div class="setup-required">
+                <span>
+                  Without the browser extension from Setup these only see one lumped browser entry, and skip falls
+                  back to system media keys.
+                </span>
+                <button class="link-button" on:click={() => setPage("setup")}>Open Setup</button>
+              </div>
+            {/if}
 
             <div class="media-control-list">
               {#each visibleMediaRows as { binding, index }}
@@ -1926,6 +2280,7 @@
 
         {#each visibleRegularRows as { binding, index }}
           {@const duplicate = duplicateOwner(binding)}
+          {@const requirement = bindingRequirement(binding)}
           <article class:deleting={deletingBindingIds.has(binding.id)} class:highlight={binding.id === highlightedBindingId} class:disabled={!binding.enabled} class:invalid={!!duplicate} on:pointerenter={setCardHoverDirection}>
             <div class="binding-main">
               <div class="binding-left">
@@ -2011,6 +2366,13 @@
               <div class="inline-warning">Duplicate of {binding.hotkey} already bound to {duplicate}.</div>
             {:else}
               <div class="binding-meta">{actionMeta(binding)} - {binding.enabled ? "armed" : "off"}</div>
+            {/if}
+
+            {#if requirement && binding.enabled}
+              <div class:hard={requirement.hard} class="setup-required">
+                <span>{requirement.text}</span>
+                <button class="link-button" on:click={() => setPage("setup")}>Open Setup</button>
+              </div>
             {/if}
 
             {#if binding.action.type === "open_app"}
@@ -2130,7 +2492,7 @@
           </article>
         {/each}
       </div>
-      {:else}
+      {:else if activePage === "settings"}
         <div class="toolbar settings-toolbar">
           <div>
             <h2>Settings</h2>
@@ -2354,6 +2716,432 @@
               The media picker still works without the extension, but browser skip is not reliable there. Install the extension to show separate playable tabs and make Next/Previous target the chosen tab.
             </div>
           </article>
+        </div>
+      {/if}
+
+      {#if activePage === "setup"}
+        <div class="toolbar">
+          <div>
+            <h2>Integration setup</h2>
+            <p>Get the browser and Discord bridges working, one step at a time</p>
+          </div>
+          <div class="actions">
+            <button class="ghost" on:click={() => setPage("guides")}>Guides</button>
+            <button class="ghost" disabled={setupDetecting || !!setupBusy} on:click={refreshSetup}>
+              {setupDetecting ? "Scanning..." : "Re-scan"}
+            </button>
+          </div>
+        </div>
+
+        <div class="toasts" aria-live="polite">
+          {#each toasts as toast}
+            <div class:error={toast.type === "error"} class:success={toast.type === "success"} class:info={toast.type === "info"} class="toast">
+              {toast.text}
+            </div>
+          {/each}
+        </div>
+
+        <!-- Equal-width columns with the connector drawn behind the dots, so the
+             segments stay the same length whatever the labels say. -->
+        <ol class="wiz-rail" aria-label="Setup progress">
+          {#each wizardStages as stage, index}
+            <li
+              class:current={wizardStep === index}
+              class:complete={stageComplete[index]}
+              class:linked={index > 0 && stageComplete[index - 1]}
+            >
+              <button
+                type="button"
+                aria-current={wizardStep === index ? "step" : undefined}
+                on:click={() => goToStep(index)}
+              >
+                <span class="wiz-rail-dot">
+                  {#if stageComplete[index]}
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                  {:else}
+                    {index + 1}
+                  {/if}
+                </span>
+                <span class="wiz-rail-label">{stage.label}</span>
+              </button>
+            </li>
+          {/each}
+        </ol>
+
+        <section class="wiz-panel">
+          {#if wizardStep === 0}
+            <header class="wiz-head">
+              <h3>What is on this machine</h3>
+              <p>Nothing is installed or changed at this stage. This only looks around.</p>
+            </header>
+
+            {#if !setupStatus}
+              <div class="wiz-placeholder">
+                {setupDetecting ? "Scanning..." : "Press Re-scan to look at this machine."}
+              </div>
+            {:else}
+              <div class="wiz-findings">
+                <div class="wiz-finding">
+                  <span class="wiz-finding-label">Browsers</span>
+                  {#if installedBrowsers.length}
+                    <strong>{installedBrowsers.map((browser) => browser.name).join(", ")}</strong>
+                    <span class="wiz-finding-note">
+                      Default: {installedBrowsers.find((browser) => browser.is_default)?.name ?? "none reported"}
+                    </span>
+                    <span class="wiz-finding-note">
+                      You pick the browser on the Browser step, so this only has to be right for convenience.
+                    </span>
+                  {:else}
+                    <strong class="wiz-bad">None found</strong>
+                    <span class="wiz-finding-note">Brave, Chrome or Edge is required for the media bridge.</span>
+                  {/if}
+                </div>
+
+                <div class="wiz-finding">
+                  <span class="wiz-finding-label">Discord</span>
+                  {#if setupStatus.discord.length}
+                    <strong>{setupStatus.discord.map((item) => item.variant).join(", ")}</strong>
+                    <span class="wiz-finding-note">
+                      {setupStatus.discord.some((item) => item.running) ? "Running now" : "Not running"}
+                    </span>
+                  {:else}
+                    <strong>Not detected</strong>
+                    <span class="wiz-finding-note">Vencord's injector searches for itself, so this is only a hint.</span>
+                  {/if}
+                </div>
+
+                <div class="wiz-finding">
+                  <span class="wiz-finding-label">Build tools</span>
+                  {#if missingTools.length === 0}
+                    <strong>All present</strong>
+                    <span class="wiz-finding-note">git, Node and pnpm are ready.</span>
+                  {:else}
+                    <strong class="wiz-warn">Missing {missingTools.map((tool) => tool.name).join(", ")}</strong>
+                    <span class="wiz-finding-note">Only needed for the Discord bridge.</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            <footer class="wiz-foot">
+              <span></span>
+              <button class="primary" disabled={!setupStatus} on:click={() => goToStep(1)}>Start setup</button>
+            </footer>
+          {/if}
+
+          {#if wizardStep === 1}
+            <header class="wiz-head">
+              <h3>Browser media bridge</h3>
+              <p>
+                Makes each playing tab its own row in the media picker, instead of one lumped browser entry, and lets
+                Next and Previous target the tab you picked.
+              </p>
+            </header>
+
+            {#if installedBrowsers.length === 0}
+              <div class="wiz-placeholder">No Chromium browser found, so there is nothing to install into.</div>
+            {:else}
+              <div class="wiz-task" class:done={setupStatus?.extension_staged}>
+                <div class="wiz-task-mark">
+                  {#if setupStatus?.extension_staged}
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                  {:else}1{/if}
+                </div>
+                <div class="wiz-task-body">
+                  <div class="wiz-task-title">
+                    <strong>Stage the extension files</strong>
+                    {#if setupStatus?.extension_staged}<span class="wiz-state ok">Staged</span>{/if}
+                  </div>
+                  <p>
+                    Copies them to a permanent folder. This matters because the browser disables an unpacked extension
+                    if the folder it was loaded from ever moves.
+                  </p>
+                  {#if setupStatus?.extension_staged}
+                    <div class="wiz-path">
+                      <code title={setupStatus.extension_staged_path}>{setupStatus.extension_staged_path}</code>
+                      <button class="wiz-mini" on:click={copyStagedPath}>Copy</button>
+                      <button class="wiz-mini" on:click={revealStagedFolder}>Open</button>
+                    </div>
+                  {/if}
+                  <div class="wiz-actions">
+                    <button class="primary-soft" disabled={setupBusy === "stage"} on:click={stageExtension}>
+                      {setupBusy === "stage" ? "Staging..." : setupStatus?.extension_staged ? "Re-stage" : "Stage files"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="wiz-task" class:muted={!setupStatus?.extension_staged} class:done={extensionLive}>
+                <div class="wiz-task-mark">
+                  {#if extensionLive}
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                  {:else}2{/if}
+                </div>
+                <div class="wiz-task-body">
+                  <div class="wiz-task-title">
+                    <strong>Load it in {installedBrowsers.find((browser) => browser.id === selectedBrowser)?.name ?? "the browser"}</strong>
+                  </div>
+                  <p>
+                    Pick your browser here, whatever Windows reports as default. Browsers block other apps from
+                    opening their extensions page directly, so go to the address below, turn on
+                    <em>Developer mode</em>, choose <em>Load unpacked</em>, and paste the folder path from step 1.
+                  </p>
+                  <div class="wiz-actions">
+                    <select class="wiz-select" bind:value={selectedBrowser} aria-label="Browser">
+                      {#each installedBrowsers as browser}
+                        <option value={browser.id}>{browser.name}{browser.is_default ? " (default)" : ""}</option>
+                      {/each}
+                    </select>
+                    <button class="ghost" disabled={!selectedBrowser} on:click={openSelectedBrowser}>
+                      Open browser
+                    </button>
+                  </div>
+                  <div class="wiz-path">
+                    <code>{extensionsUrl}</code>
+                    <button class="wiz-mini" on:click={copyExtensionsUrl}>Copy</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="wiz-task" class:muted={!setupStatus?.extension_staged} class:done={extensionLive}>
+                <div class="wiz-task-mark">
+                  {#if extensionLive}
+                    <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                  {:else}3{/if}
+                </div>
+                <div class="wiz-task-body">
+                  <div class="wiz-task-title">
+                    <strong>Confirm it connected</strong>
+                    {#if extensionLive}
+                      <span class="wiz-state ok">{browserBridge.targets} target{browserBridge.targets === 1 ? "" : "s"}</span>
+                    {:else}
+                      <span class="wiz-state">Waiting</span>
+                    {/if}
+                  </div>
+                  <p>Play something in a tab, then check. The extension reports in to the daemon on its own.</p>
+                  <div class="wiz-actions">
+                    <button class="ghost" disabled={browserBridgeCheckingVisual} on:click={() => refreshBrowserBridge()}>
+                      {browserBridgeCheckingVisual ? "Checking..." : "Check connection"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            {/if}
+
+            <footer class="wiz-foot">
+              <button class="ghost" on:click={() => goToStep(0)}>Back</button>
+              <div class="wiz-foot-right">
+                <button class="ghost" on:click={() => goToStep(2)}>Skip</button>
+                <button class="primary" on:click={() => goToStep(2)}>Next</button>
+              </div>
+            </footer>
+          {/if}
+
+          {#if wizardStep === 2}
+            <header class="wiz-head">
+              <h3>Discord audio bridge</h3>
+              <p>
+                Adds hotkeys that switch Discord's output and microphone device. It ships as a Vencord userplugin, and
+                userplugins only run from a Vencord source build, so the tools below are required.
+              </p>
+            </header>
+
+            <div class="wiz-task" class:done={vencordToolsReady}>
+              <div class="wiz-task-mark">
+                {#if vencordToolsReady}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                {:else}1{/if}
+              </div>
+              <div class="wiz-task-body">
+                <div class="wiz-task-title">
+                  <strong>Build tools</strong>
+                  {#if vencordToolsReady}<span class="wiz-state ok">Ready</span>{/if}
+                </div>
+                <div class="wiz-chips">
+                  {#each setupStatus?.tools ?? [] as tool}
+                    <span class:missing={!tool.found} class="wiz-chip">
+                      <b>{tool.name}</b>
+                      {#if tool.found}
+                        {shortVersion(tool.version)}
+                      {:else}
+                        <button class="link-button" on:click={() => openExternal(tool.install_url)}>install</button>
+                      {/if}
+                    </span>
+                  {/each}
+                </div>
+                {#if !vencordToolsReady}
+                  <div class="wiz-actions">
+                    <button class="primary-soft" disabled={!!setupBusy} on:click={installBuildTools}>
+                      {setupBusy === "tools" ? "Installing..." : "Install missing tools for me"}
+                    </button>
+                    <span class="wiz-hint">
+                      {setupTool("git")?.found && setupTool("node")?.found
+                        ? "npm can handle pnpm on its own"
+                        : "uses winget, the installer Windows ships with"}
+                    </span>
+                  </div>
+                {/if}
+              </div>
+            </div>
+
+            <div class="wiz-task" class:muted={!vencordToolsReady} class:done={bridgeInstalled}>
+              <div class="wiz-task-mark">
+                {#if bridgeInstalled}
+                  <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8.5l3 3 6-7" /></svg>
+                {:else}2{/if}
+              </div>
+              <div class="wiz-task-body">
+                <div class="wiz-task-title">
+                  <strong>Build and inject</strong>
+                  {#if bridgeInstalled}<span class="wiz-state ok">Injected</span>{/if}
+                </div>
+                <p>
+                  Clones Vencord, installs its dependencies, copies the plugin in, builds, and injects into Discord.
+                  Expect a few minutes the first time.
+                </p>
+                <label class="wiz-check">
+                  <input type="checkbox" bind:checked={closeDiscordDuringInstall} />
+                  <span>Close Discord during install, which the injector needs</span>
+                </label>
+                <div class="wiz-actions">
+                  <button class="primary" disabled={!vencordToolsReady || !!setupBusy} on:click={installVencordBridge}>
+                    {setupBusy === "vencord" ? "Installing..." : bridgeInstalled ? "Reinstall bridge" : "Install bridge"}
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {#if setupSteps.length}
+              <div class="wiz-progress">
+                {#each setupSteps as step}
+                  <div class:done={step.done && !step.failed} class:failed={step.failed} class="wiz-progress-row">
+                    <span class="wiz-progress-mark"></span>
+                    <div class="wiz-progress-body">
+                      <strong>{step.step}</strong>
+                      {#if step.detail}<pre>{step.detail}</pre>{/if}
+                    </div>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+
+            {#if bridgeInstalled}
+              <div class="wiz-final-note">
+                One manual step left: open Discord and enable <b>OutputDeviceBridge</b> under
+                Settings &gt; Vencord &gt; Plugins.
+              </div>
+            {/if}
+
+            <footer class="wiz-foot">
+              <button class="ghost" on:click={() => goToStep(1)}>Back</button>
+              <div class="wiz-foot-right">
+                <button class="ghost" on:click={() => goToStep(3)}>Skip</button>
+                <button class="primary" on:click={() => goToStep(3)}>Next</button>
+              </div>
+            </footer>
+          {/if}
+
+          {#if wizardStep === 3}
+            <header class="wiz-head">
+              <h3>Where things stand</h3>
+              <p>Anything unfinished can be picked up later. Nothing here expires.</p>
+            </header>
+
+            <div class="wiz-summary">
+              <div class="wiz-summary-row" class:done={extensionLive}>
+                <span class="wiz-summary-mark"></span>
+                <div>
+                  <strong>Browser media bridge</strong>
+                  <p>
+                    {extensionLive
+                      ? "Connected. Playing tabs show up as their own rows in the media picker."
+                      : "Not connected yet. The media picker still works, but browser skip stays unreliable."}
+                  </p>
+                </div>
+                {#if !extensionLive}
+                  <button class="ghost" on:click={() => goToStep(1)}>Finish</button>
+                {/if}
+              </div>
+
+              <div class="wiz-summary-row" class:done={bridgeInstalled}>
+                <span class="wiz-summary-mark"></span>
+                <div>
+                  <strong>Discord audio bridge</strong>
+                  <p>
+                    {bridgeInstalled
+                      ? "Installed. Enable OutputDeviceBridge in Discord, then bind the Discord device actions."
+                      : "Not installed. Discord device hotkeys will not do anything until it is."}
+                  </p>
+                </div>
+                {#if !bridgeInstalled}
+                  <button class="ghost" on:click={() => goToStep(2)}>Finish</button>
+                {/if}
+              </div>
+            </div>
+
+            <footer class="wiz-foot">
+              <button class="ghost" on:click={() => goToStep(2)}>Back</button>
+              <div class="wiz-foot-right">
+                <button class="primary" on:click={() => setPage("bindings")}>Go to bindings</button>
+              </div>
+            </footer>
+          {/if}
+        </section>
+      {/if}
+
+      {#if activePage === "guides"}
+        <div class="toolbar">
+          <div>
+            <h2>Guides</h2>
+            <p>{guides.length} walkthroughs</p>
+          </div>
+          <div class="actions">
+            <!-- Guides is reached from Setup rather than the sidebar, so it needs
+                 its own way back or the page is a dead end. -->
+            <button class="ghost" on:click={() => setPage("setup")}>Back to setup</button>
+          </div>
+        </div>
+
+        <div class="guide-list">
+          {#each guides as guide}
+            <article class="guide-card">
+              <header>
+                <div>
+                  <h3>{guide.title}</h3>
+                  <p>{guide.summary}</p>
+                </div>
+                <div class="guide-meta">
+                  <span class="guide-tag">{guide.tag}</span>
+                  <span>{guide.minutes} min</span>
+                </div>
+              </header>
+
+              <ol class="guide-steps">
+                {#each guide.steps as step, index}
+                  <li>
+                    <span class="guide-step-number">{index + 1}</span>
+                    <div class="guide-step-body">
+                      <p>{step.text}</p>
+                      {#if step.code}
+                        <pre class="guide-code">{step.code}</pre>
+                      {/if}
+                      {#if step.image}
+                        <figure class="guide-figure">
+                          <img src={step.image} alt={step.caption ?? step.text} loading="lazy" />
+                          {#if step.caption}<figcaption>{step.caption}</figcaption>{/if}
+                        </figure>
+                      {/if}
+                      {#if step.link}
+                        <button class="link-button" on:click={() => openExternal(step.link!.url)}>
+                          {step.link.label}
+                        </button>
+                      {/if}
+                    </div>
+                  </li>
+                {/each}
+              </ol>
+            </article>
+          {/each}
         </div>
       {/if}
     </section>

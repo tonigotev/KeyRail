@@ -38,6 +38,15 @@ struct MediaTarget {
     int favIconHeight = 0;
 };
 
+// Creates the overlay window and starts GDI+ up front. Without this the first
+// overlay of the session pays that setup, which is a visible delay.
+void warmMediaOverlay();
+
+// Refreshes the media target list on a timer so the picker can open from a warm
+// cache instead of querying at keypress time.
+void startMediaTargetPolling();
+void stopMediaTargetPolling();
+
 std::vector<MediaTarget> listMediaTargets(std::wstring* report = nullptr);
 
 bool openMediaPicker(std::wstring* report = nullptr);

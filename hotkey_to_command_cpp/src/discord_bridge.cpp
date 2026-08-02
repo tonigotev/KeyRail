@@ -250,6 +250,11 @@ void stopDiscordBridge() {
     }
 }
 
+size_t discordBridgeClientCount() {
+    std::lock_guard<std::mutex> lock(g_clientsMutex);
+    return g_clients.size();
+}
+
 bool sendDiscordBridgeCommand(const std::string& command, std::wstring* report) {
     std::vector<SOCKET> snapshot;
     {

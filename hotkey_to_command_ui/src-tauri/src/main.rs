@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod setup;
+
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -383,7 +385,10 @@ fn daemon_candidates() -> Vec<PathBuf> {
 
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
+            // An installed build ships the daemon as a bundled resource, which
+            // lands beside the UI executable.
             push_candidate(&mut paths, &mut seen, dir.join("hotkeyd.exe"));
+            push_candidate(&mut paths, &mut seen, dir.join("binaries").join("hotkeyd.exe"));
             push_repo_candidates(&mut paths, &mut seen, dir);
         }
     }
@@ -847,6 +852,17 @@ fn browser_bridge_status() -> Result<BrowserBridgeStatus, String> {
     })
 }
 
+/// Connected Vencord clients. Zero means any Discord device action will silently
+/// do nothing, which the bindings list warns about.
+#[tauri::command]
+fn discord_bridge_clients() -> i64 {
+    send_pipe_raw("discord_status")
+        .ok()
+        .and_then(|response| serde_json::from_str::<Value>(&response).ok())
+        .and_then(|value| value.get("clients").and_then(Value::as_i64))
+        .unwrap_or(0)
+}
+
 #[tauri::command]
 fn ensure_daemon() -> Result<(), String> {
     if send_pipe_raw("status").is_ok() {
@@ -956,7 +972,39 @@ fn open_browser_extensions_page(browser: String) -> Result<(), String> {
     Ok(())
 }
 
+/// `--run-setup <targets>` performs integration setup without opening a window,
+/// so the installer can do it inline and show the output.
+///
+/// This is a windows subsystem binary, so it owns no console. Attaching to the
+/// caller's console is what makes println! visible when a human runs it from a
+/// terminal. Critically, that must NOT happen when stdout is already a pipe:
+/// nsExec::ExecToLog reads through one, and attaching a console replaces the
+/// inherited pipe handle, which silently throws the log away.
+fn run_setup_cli() -> Option<i32> {
+    let args: Vec<String> = env::args().collect();
+    let index = args.iter().position(|arg| arg == "--run-setup")?;
+    let targets = args.get(index + 1).cloned().unwrap_or_default();
+
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::System::Console::{
+            AttachConsole, GetStdHandle, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
+        };
+
+        let existing = GetStdHandle(STD_OUTPUT_HANDLE);
+        if existing.is_null() || existing == INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+
+    Some(setup::run_headless_setup(&targets))
+}
+
 fn main() {
+    if let Some(code) = run_setup_cli() {
+        std::process::exit(code);
+    }
+
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -972,9 +1020,19 @@ fn main() {
             set_daemon_elevated_startup,
             restart_daemon_as_admin,
             browser_bridge_status,
+            discord_bridge_clients,
             select_app_path,
             select_script_path,
-            open_browser_extensions_page
+            open_browser_extensions_page,
+            setup::detect_setup,
+            setup::take_pending_setup,
+            setup::stage_browser_extension,
+            setup::open_browser,
+            setup::reveal_path,
+            setup::open_url,
+            setup::install_pnpm,
+            setup::install_build_tools,
+            setup::install_vencord_bridge
         ])
         .run(tauri::generate_context!())
         .expect("error while running Hotkey To Command UI");

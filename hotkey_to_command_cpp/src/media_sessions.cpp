@@ -1,6 +1,7 @@
 #include "media_sessions.h"
 
 #include "browser_bridge.h"
+#include "display_state.h"
 
 #include <windows.h>
 #include <wincodec.h>
@@ -20,6 +21,7 @@ using std::max;
 #include <winrt/base.h>
 
 #include <algorithm>
+#include <condition_variable>
 #include <cwctype>
 #include <cstdint>
 #include <cstring>
@@ -45,6 +47,23 @@ constexpr int kToastMinWidth = 300;
 constexpr int kToastMaxWidth = 560;
 constexpr int kOverlayMargin = 36;
 constexpr int kOverlayTopMargin = 72;
+
+// Corner radius of every overlay card. The painted panel, the border stroke and
+// the window region all derive from this, so they must never drift apart: the
+// region clips whatever the panel paints, and a mismatch shears the border off
+// at the corners. Note CreateRoundRectRgn takes ellipse size, hence the doubling.
+constexpr int kOverlayRadius = 18;
+constexpr int kOverlayRegionEllipse = kOverlayRadius * 2;
+
+// Passed as the overlay timeout to repaint without restarting the auto-hide
+// countdown. The background poller redraws the open picker roughly once a
+// second, and resetting the timer each time would keep it on screen forever.
+constexpr DWORD kOverlayKeepTimeout = 0xFFFFFFFF;
+
+// Gap between finished target queries. A full query costs ~12ms, so once a
+// second is cheap, and sleeping between completions rather than on a fixed
+// schedule means a slow browser reply throttles the loop instead of stacking up.
+constexpr DWORD kTargetPollIntervalMs = 1000;
 
 // Toast (message overlay) layout. The card is a single horizontal row: an accent
 // badge on the left and the message text beside it, both vertically centered as a
@@ -198,9 +217,18 @@ void addRoundedRect(Gdiplus::GraphicsPath& path, Gdiplus::RectF r, float radius)
 
 std::mutex g_pickerMutex;
 std::vector<MediaTarget> g_pickerTargets;
+// Kept current by the background poller, so opening the picker paints a real
+// list on the first frame instead of waiting for a query to come back.
+std::vector<MediaTarget> g_lastKnownTargets;
 size_t g_pickerIndex = 0;
 bool g_pickerOpen = false;
 bool g_hasSelectedTarget = false;
+
+std::mutex g_pollMutex;
+std::condition_variable g_pollCv;
+std::thread g_pollThread;
+bool g_pollRunning = false;
+bool g_pollWakeRequested = false;
 std::wstring g_selectedId;
 std::wstring g_selectedKind;
 std::wstring g_selectedAppId;
@@ -218,6 +246,9 @@ struct OverlayState {
     std::wstring message;
     std::vector<MediaTarget> targets;
     size_t selected = 0;
+    // True while a background refresh is still running, so an empty picker says
+    // it is still looking instead of claiming nothing is playing.
+    bool loading = false;
 };
 
 std::mutex g_overlayMutex;
@@ -492,18 +523,25 @@ void fillRectColor(HDC dc, const RECT& rect, COLORREF color) {
     DeleteObject(brush);
 }
 
+// Paints the card background plus its edge. The edge is one crisp neutral
+// hairline with the accent glow sitting just inside it, so every overlay mode
+// gets the same outline and the corners stay even all the way round.
 void drawOverlayShell(HDC dc, const RECT& panel, COLORREF accent = kAccent) {
+    fillRoundRect(dc, panel, kOverlayRadius, kPanel, kPanelBorder);
+
     Gdiplus::Graphics g(dc);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
     g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHalf);
 
+    // Inset a full pixel so the glow lands inside the hairline instead of
+    // fighting it for the same pixels.
     Gdiplus::RectF edge(
-        static_cast<float>(panel.left) + 0.5f,
-        static_cast<float>(panel.top) + 0.5f,
-        static_cast<float>(panel.right - panel.left) - 1.0f,
-        static_cast<float>(panel.bottom - panel.top) - 1.0f);
+        static_cast<float>(panel.left) + 1.5f,
+        static_cast<float>(panel.top) + 1.5f,
+        static_cast<float>(panel.right - panel.left) - 3.0f,
+        static_cast<float>(panel.bottom - panel.top) - 3.0f);
     Gdiplus::GraphicsPath path;
-    addRoundedRect(path, edge, 17.0f);
+    addRoundedRect(path, edge, static_cast<float>(kOverlayRadius) - 1.5f);
 
     Gdiplus::Pen glow(gpColor(accent, 110), 1.4f);
     g.DrawPath(&glow, &path);
@@ -875,7 +913,6 @@ void drawFooter(HDC dc, const RECT& footer, bool picker, bool hasControlledTarge
 
 void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont, HFONT bodyFont, HFONT metaFont, HFONT keyFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    fillRoundRect(dc, panel, 18, kPanel);
     drawOverlayShell(dc, panel);
 
     RECT accent{panel.left + 16, panel.top + 17, panel.left + 19, panel.top + 31};
@@ -903,9 +940,14 @@ void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, H
     if (state.targets.empty()) {
         drawEqualizer(dc, (panel.left + panel.right) / 2 - 8, content.top + 58, RGB(72, 76, 90));
         RECT emptyTitle{content.left + 34, content.top + 100, content.right - 34, content.top + 126};
-        drawTextLine(dc, L"No media playing in any tab", emptyTitle, titleFont, RGB(211, 214, 224), DT_CENTER);
         RECT emptyBody{content.left + 80, content.top + 134, content.right - 80, content.top + 178};
-        drawTextLine(dc, L"Start playback in a browser tab and it will appear here.", emptyBody, bodyFont, RGB(141, 145, 156), DT_CENTER);
+        if (state.loading) {
+            drawTextLine(dc, L"Looking for media", emptyTitle, titleFont, RGB(211, 214, 224), DT_CENTER);
+            drawTextLine(dc, L"Checking Windows sessions and browser tabs.", emptyBody, bodyFont, RGB(141, 145, 156), DT_CENTER);
+        } else {
+            drawTextLine(dc, L"No media playing in any tab", emptyTitle, titleFont, RGB(211, 214, 224), DT_CENTER);
+            drawTextLine(dc, L"Start playback in a browser tab and it will appear here.", emptyBody, bodyFont, RGB(141, 145, 156), DT_CENTER);
+        }
         drawFooter(dc, footer, false, false, keyFont, metaFont);
         return;
     }
@@ -927,7 +969,6 @@ void paintPickerOverlay(HDC dc, const RECT& bounds, const OverlayState& state, H
 
 void paintConfirmationOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont, HFONT bodyFont, HFONT metaFont, HFONT keyFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    fillRoundRect(dc, panel, 18, kPanel);
     drawOverlayShell(dc, panel);
 
     RECT banner{panel.left + 2, panel.top + 2, panel.right - 2, panel.top + 48};
@@ -951,8 +992,7 @@ void paintConfirmationOverlay(HDC dc, const RECT& bounds, const OverlayState& st
 
 void paintMessageOverlay(HDC dc, const RECT& bounds, const OverlayState& state, HFONT titleFont) {
     RECT panel{0, 0, bounds.right, bounds.bottom};
-    fillRoundRect(dc, panel, 18, kPanel);
-    drawOverlayShell(dc, panel); // same accent border as the picker/confirmation
+    drawOverlayShell(dc, panel); // same edge as the picker/confirmation
 
     const ToastLayout layout = computeToastLayout(state.message);
 
@@ -1050,18 +1090,24 @@ POINT overlayPositionForSize(int width, int height) {
     return {x, y};
 }
 
+// Never call BringWindowToTop or SetForegroundWindow here. Both ask Windows to
+// activate the overlay, and an activation change is what drops a fullscreen game
+// out of exclusive mode and minimizes it. SetWindowPos with SWP_NOACTIVATE moves
+// the window in the z-order without touching the foreground, so the game keeps
+// focus and stays where it is.
 void showOverlayTopmost(HWND hwnd, int x, int y, int width, int height) {
-    constexpr UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER;
+    constexpr UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING;
     SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags);
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    BringWindowToTop(hwnd);
-    SetWindowPos(hwnd, HWND_TOPMOST, x, y, width, height, flags | SWP_NOSENDCHANGING);
 }
 
+// Games re-assert their own topmost position, so the overlay reclaims the top of
+// the z-order periodically. Pure z-order only: no move, no resize, no show, no
+// activation, so the game never sees a state change worth reacting to.
 void pulseOverlayTopmost(HWND hwnd) {
     if (!IsWindowVisible(hwnd)) return;
     SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER | SWP_NOSENDCHANGING);
 }
 
 LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1076,12 +1122,26 @@ LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
         const int width = overlayWidthForState(state);
         const int height = overlayHeightForState(state);
         const POINT position = overlayPositionForSize(width, height);
-        HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, 18, 18);
-        SetWindowRgn(hwnd, region, TRUE);
-        showOverlayTopmost(hwnd, position.x, position.y, width, height);
-        InvalidateRect(hwnd, nullptr, TRUE);
-        SetTimer(hwnd, kOverlayTimer, static_cast<UINT>(wParam == 0 ? 5000 : wParam), nullptr);
-        SetTimer(hwnd, kOverlayTopmostPulseTimer, 80, nullptr);
+
+        // Reshaping and repositioning an already-correct window makes it blink.
+        // A refresh that keeps the same geometry only needs a repaint.
+        RECT current{};
+        const bool visible = IsWindowVisible(hwnd) && GetWindowRect(hwnd, &current);
+        const bool sameGeometry = visible
+            && current.left == position.x && current.top == position.y
+            && current.right - current.left == width
+            && current.bottom - current.top == height;
+
+        if (!sameGeometry) {
+            HRGN region = CreateRoundRectRgn(0, 0, width + 1, height + 1, kOverlayRegionEllipse, kOverlayRegionEllipse);
+            SetWindowRgn(hwnd, region, TRUE);
+            showOverlayTopmost(hwnd, position.x, position.y, width, height);
+        }
+        InvalidateRect(hwnd, nullptr, FALSE);
+        if (wParam != kOverlayKeepTimeout) {
+            SetTimer(hwnd, kOverlayTimer, static_cast<UINT>(wParam == 0 ? 5000 : wParam), nullptr);
+        }
+        SetTimer(hwnd, kOverlayTopmostPulseTimer, 250, nullptr);
         return 0;
     }
     case WM_MEDIA_OVERLAY_HIDE:
@@ -1098,6 +1158,10 @@ LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             pulseOverlayTopmost(hwnd);
         }
         return 0;
+    case WM_ERASEBKGND:
+        // The card is painted edge to edge every frame, so letting Windows erase
+        // first only produces a flash of blank window.
+        return 1;
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
@@ -1109,7 +1173,20 @@ LRESULT CALLBACK overlayWndProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM l
             std::lock_guard<std::mutex> lock(g_overlayMutex);
             state = g_overlayState;
         }
-        paintOverlay(dc, rect, state);
+
+        // Draw into a memory bitmap and blit once. Painting the panel, rows and
+        // artwork straight onto the window DC lets each step show up separately,
+        // which reads as a flicker whenever the picker redraws.
+        HDC memDc = CreateCompatibleDC(dc);
+        HBITMAP bitmap = CreateCompatibleBitmap(dc, rect.right, rect.bottom);
+        HGDIOBJ oldBitmap = SelectObject(memDc, bitmap);
+
+        paintOverlay(memDc, rect, state);
+        BitBlt(dc, 0, 0, rect.right, rect.bottom, memDc, 0, 0, SRCCOPY);
+
+        SelectObject(memDc, oldBitmap);
+        DeleteObject(bitmap);
+        DeleteDC(memDc);
 
         EndPaint(hwnd, &ps);
         return 0;
@@ -1176,6 +1253,12 @@ void showOverlayState(const OverlayState& state, DWORD milliseconds = 5000) {
     ensureOverlayThread();
     if (!g_overlayWindow) return;
 
+    // A background refresh is not a new appearance, so it should not be counted
+    // as another suppressed overlay.
+    if (milliseconds != kOverlayKeepTimeout) {
+        noteOverlayShown(state.mode == OverlayMode::Picker ? L"media picker" : L"media overlay");
+    }
+
     {
         std::lock_guard<std::mutex> lock(g_overlayMutex);
         g_overlayState = state;
@@ -1190,11 +1273,12 @@ void showOverlay(const std::wstring& text, DWORD milliseconds = 5000) {
     showOverlayState(state, milliseconds);
 }
 
-void showPickerOverlay(const std::vector<MediaTarget>& targets, size_t selected, DWORD milliseconds = 5000) {
+void showPickerOverlay(const std::vector<MediaTarget>& targets, size_t selected, DWORD milliseconds = 5000, bool loading = false) {
     OverlayState state;
     state.mode = OverlayMode::Picker;
     state.targets = targets;
     state.selected = targets.empty() ? 0 : (std::min)(selected, targets.size() - 1);
+    state.loading = loading;
     showOverlayState(state, milliseconds);
 }
 
@@ -1432,6 +1516,10 @@ bool selectedTargetExists(std::wstring* report) {
 
 } // namespace
 
+void warmMediaOverlay() {
+    ensureOverlayThread();
+}
+
 std::vector<MediaTarget> listMediaTargets(std::wstring* report) {
     std::wstring windowsReport;
     std::wstring browserReport;
@@ -1490,18 +1578,121 @@ std::vector<MediaTarget> listMediaTargetsLive(std::wstring* report) {
     return targets;
 }
 
-bool openMediaPicker(std::wstring* report) {
-    std::wstring queryReport;
-    std::vector<MediaTarget> targets = listMediaTargetsLive(&queryReport);
+namespace {
 
+// Only the fields the picker actually draws. Artwork is compared by size rather
+// than by pixels, which is enough to notice a track change without memcmp-ing
+// every frame.
+bool sameTargetForDisplay(const MediaTarget& a, const MediaTarget& b) {
+    return a.id == b.id
+        && a.playing == b.playing
+        && a.playbackStatus == b.playbackStatus
+        && a.title == b.title
+        && a.artist == b.artist
+        && a.appId == b.appId
+        && a.sourceHost == b.sourceHost
+        && a.tabTitle == b.tabTitle
+        && a.documentTitle == b.documentTitle
+        && a.canTogglePlayPause == b.canTogglePlayPause
+        && a.canNext == b.canNext
+        && a.canPrevious == b.canPrevious
+        && a.artworkBgra.size() == b.artworkBgra.size()
+        && a.favIconBgra.size() == b.favIconBgra.size();
+}
+
+bool sameTargetsForDisplay(const std::vector<MediaTarget>& a, const std::vector<MediaTarget>& b) {
+    return a.size() == b.size()
+        && std::equal(a.begin(), a.end(), b.begin(), sameTargetForDisplay);
+}
+
+// Stores a completed query and, when the picker is on screen, redraws it. The
+// redraw is skipped when nothing visible changed, so an idle picker is not
+// repainted once a second for no reason.
+void publishTargets(std::vector<MediaTarget> fresh) {
     std::lock_guard<std::mutex> lock(g_pickerMutex);
-    g_pickerTargets = std::move(targets);
-    g_pickerOpen = true;
-    chooseInitialPickerIndex();
+    g_lastKnownTargets = fresh;
+    if (!g_pickerOpen) return;
+    if (sameTargetsForDisplay(g_pickerTargets, fresh)) return;
 
-    showPickerOverlay(g_pickerTargets, g_pickerIndex);
-    if (report) *report = queryReport;
-    return !g_pickerTargets.empty();
+    // Keep the highlight on the same target, since a refresh can reorder or
+    // drop rows underneath it.
+    std::wstring selectedId;
+    if (g_pickerIndex < g_pickerTargets.size()) selectedId = g_pickerTargets[g_pickerIndex].id;
+
+    g_pickerTargets = std::move(fresh);
+
+    const auto match = selectedId.empty()
+        ? g_pickerTargets.end()
+        : std::find_if(g_pickerTargets.begin(), g_pickerTargets.end(),
+              [&](const MediaTarget& target) { return target.id == selectedId; });
+    if (match != g_pickerTargets.end()) {
+        g_pickerIndex = static_cast<size_t>(std::distance(g_pickerTargets.begin(), match));
+    } else {
+        chooseInitialPickerIndex();
+    }
+
+    // kOverlayKeepTimeout: a background refresh must not extend the countdown
+    // the user's keypress started.
+    showPickerOverlay(g_pickerTargets, g_pickerIndex, kOverlayKeepTimeout);
+}
+
+void mediaPollThreadMain() {
+    for (;;) {
+        publishTargets(listMediaTargetsLive(nullptr));
+
+        std::unique_lock<std::mutex> lock(g_pollMutex);
+        g_pollCv.wait_for(lock, std::chrono::milliseconds(kTargetPollIntervalMs),
+            [] { return !g_pollRunning || g_pollWakeRequested; });
+        if (!g_pollRunning) return;
+        g_pollWakeRequested = false;
+    }
+}
+
+void requestMediaTargetRefresh() {
+    std::lock_guard<std::mutex> lock(g_pollMutex);
+    g_pollWakeRequested = true;
+    g_pollCv.notify_all();
+}
+
+} // namespace
+
+void startMediaTargetPolling() {
+    std::lock_guard<std::mutex> lock(g_pollMutex);
+    if (g_pollRunning) return;
+    g_pollRunning = true;
+    g_pollThread = std::thread(mediaPollThreadMain);
+}
+
+void stopMediaTargetPolling() {
+    {
+        std::lock_guard<std::mutex> lock(g_pollMutex);
+        if (!g_pollRunning) return;
+        g_pollRunning = false;
+        g_pollCv.notify_all();
+    }
+    if (g_pollThread.joinable()) g_pollThread.join();
+}
+
+// Opening the picker paints straight from the polled cache, which the poller
+// keeps under a second old. The live query blocks for up to 1.8s waiting on the
+// browser extension, plus WinRT session calls and artwork decoding, so running
+// it before the first paint is what used to make the overlay slow to appear.
+bool openMediaPicker(std::wstring* report) {
+    bool warmingUp = false;
+    {
+        std::lock_guard<std::mutex> lock(g_pickerMutex);
+        g_pickerTargets = g_lastKnownTargets;
+        g_pickerOpen = true;
+        warmingUp = g_pickerTargets.empty();
+        chooseInitialPickerIndex();
+        showPickerOverlay(g_pickerTargets, g_pickerIndex, 5000, warmingUp);
+    }
+
+    // Only matters right after startup, before the poller has published a list.
+    if (warmingUp) requestMediaTargetRefresh();
+
+    if (report) *report = L"Media picker opened.";
+    return true;
 }
 
 bool moveMediaPicker(int direction, std::wstring* report) {

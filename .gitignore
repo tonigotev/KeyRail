@@ -5,6 +5,7 @@ Thumbs.db
 *.swo
 .vscode/
 .idea/
+.claude/
 
 # C++ / CMake build output
 hotkey_to_command_cpp/build/
@@ -27,6 +28,10 @@ hotkey_to_command_ui/.vite/
 # Rust / Tauri output
 hotkey_to_command_ui/src-tauri/target/
 hotkey_to_command_ui/src-tauri/gen/
+
+# build.ps1 output
+dist/
+hotkey_to_command_ui/src-tauri/binaries/
 
 # Local runtime config
 config.json

@@ -1,0 +1,35 @@
+<Configuration>
+  <!--
+    Windows Sandbox config for testing the installer on a genuinely clean
+    machine. Requires the "Windows Sandbox" optional feature, enabled once with:
+
+      DISM /Online /Enable-Feature /FeatureName:Containers-DisposableClientVM /All
+
+    The sandbox boots a throwaway Windows with no git, no Node.js, no pnpm, no
+    Discord and no browser extensions, which is the state a development machine
+    can never reproduce. Everything is discarded on close, so a failed install
+    costs nothing.
+
+    EDIT HostFolder BELOW to the dist folder inside your own clone. Windows
+    Sandbox does not expand environment variables or relative paths, so it has
+    to be an absolute path.
+
+    Note: Networking accepts only Default or Disable. "Enable" is not valid and
+    makes the whole config fail to parse, surfacing as the unhelpful
+    "Windows Sandbox failed to initialize" with 0x80070003.
+  -->
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>C:\path\to\your\clone\dist</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\dist</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+
+  <Networking>Default</Networking>
+  <MemoryInMB>8192</MemoryInMB>
+
+  <LogonCommand>
+    <Command>cmd.exe /c start "" "C:\Users\WDAGUtilityAccount\Desktop\dist"</Command>
+  </LogonCommand>
+</Configuration>

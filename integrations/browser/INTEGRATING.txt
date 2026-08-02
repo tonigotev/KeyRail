@@ -1,0 +1,155 @@
+USING THE MEDIA BRIDGE FROM YOUR OWN APP
+========================================
+
+The extension is not tied to Hotkey To Command by anything except a URL. It is a
+WebSocket *client*: on startup it dials a server on the local machine and speaks
+a small JSON protocol. Anything that binds that port and speaks the protocol gets
+a live list of browser tabs playing media, and can control them.
+
+If you want per-tab media control in your own desktop app, you do not need to
+write a browser extension. You need a WebSocket server.
+
+
+THE ENDPOINT
+------------
+
+  ws://127.0.0.1:8790/browser-media
+
+The extension connects out to this and retries with backoff while it is down, so
+your app can start and stop freely.
+
+
+HANDSHAKE
+---------
+
+On connect the extension sends:
+
+  {
+    "id": "extension-1",
+    "type": "hello",
+    "payload": {
+      "name": "Hotkey To Command Media Bridge",
+      "version": "0.1.0",
+      "app": "Brave"
+    }
+  }
+
+It then immediately pushes a media_targets message. No reply to hello is needed.
+
+
+WHAT THE EXTENSION PUSHES
+-------------------------
+
+Unprompted, whenever tabs change, media starts or stops, or the user navigates:
+
+  {
+    "type": "media_targets",
+    "payload": {
+      "targets": [ ... ],
+      "scanLog": [ "..." ],
+      "ts": 1730000000000
+    }
+  }
+
+This is push-based. You do not need to poll, and polling is expensive: each scan
+injects a script into every frame of every open tab.
+
+A target looks like:
+
+  {
+    "id": "browser:1234:0",           tabId:frameId, stable while the tab lives
+    "kind": "browser_tab",
+    "title": "Song name",
+    "artist": "Artist",
+    "url": "https://...",
+    "favIconUrl": "data:image/png;base64,...",
+    "playing": true,
+    "canNext": true,
+    "canPrevious": true
+  }
+
+Use "id" as the handle for every command below.
+
+
+WHAT YOU CAN SEND
+-----------------
+
+Request a fresh scan. Prefer the pushed updates; this exists for a cold start.
+
+  { "id": "1", "type": "request_targets" }
+
+Control one tab. command is one of: play_pause, play, pause, next, previous.
+
+  {
+    "id": "2",
+    "type": "control_media",
+    "payload": { "targetId": "browser:1234:0", "command": "next" }
+  }
+
+Focus a tab, optionally returning to the previous window afterwards. Used for
+sites where playback control needs a focused tab.
+
+  {
+    "id": "3",
+    "type": "activate_target",
+    "payload": { "targetId": "browser:1234:0", "restoreAfterMs": 400 }
+  }
+
+Liveness. The extension also pings you on its own; reply in kind.
+
+  { "id": "4", "type": "ping", "payload": { "at": 1730000000000 } }
+
+
+REPLIES
+-------
+
+Every request you send gets one response correlated by the id you supplied:
+
+  {
+    "id": "2",
+    "type": "response",
+    "ok": true,
+    "payload": { ... },
+    "error": { "code": "CONTROL_FAILED", "message": "..." }
+  }
+
+"error" is present only when ok is false.
+
+
+THINGS THAT WILL BITE YOU
+-------------------------
+
+Port 8790 is hardcoded in the extension and there is no options page. If two
+apps using this extension are installed, only whichever binds the port first
+gets a connection. If you expect to coexist with Hotkey To Command, fork the
+extension and change WS_URL in background.js, then publish your own listing.
+
+There is no authentication. Any local process that binds 8790 before the real
+one receives the titles and URLs of every media tab. That is acceptable for a
+local-only tool on a single-user machine and is worth knowing before you build
+something bigger on it.
+
+Scanning is not free. collectTargets() runs chrome.scripting.executeScript with
+allFrames against every open tab. Doing that on a timer is measurably expensive
+in the browser. Rely on the pushed updates.
+
+Target ids are not stable across a browser restart, because they embed the tab
+id. Re-resolve by url or title if you persist a selection.
+
+
+IF YOU WANT TO FORK IT
+----------------------
+
+  background.js   connection, scanning, command dispatch. WS_URL is line 1.
+  ms-capture.js   injected into a page to read and drive its media element
+  popup.html/js   toolbar popup showing connection state
+  manifest.json   MV3 manifest, permissions, icons
+
+Everything else in this folder is unused by the shipped extension.
+
+Package a store-ready zip from the repo root with:
+
+  .\package-extension.ps1 -Version 1.0.0
+
+Licence and attribution follow the repository's licence. If you ship a fork,
+please rename it so users can tell the two apart.

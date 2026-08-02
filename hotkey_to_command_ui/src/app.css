@@ -1,4 +1,4 @@
-:root {
+﻿:root {
   font-family: Inter, Segoe UI, system-ui, sans-serif;
   color: #182026;
   background: #e8e6e1;
@@ -3403,4 +3403,1061 @@ main[data-theme] .toast.info {
     left: 12px;
     right: auto;
   }
+}
+
+/* Tells the user a binding needs something from Setup. Informational by
+   default, because most of these degrade rather than break; .hard is for the
+   actions that genuinely do nothing without their bridge. */
+.setup-required {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  border: 1px solid #dbe0e5;
+  border-left: 3px solid #c3ccd5;
+  border-radius: 7px;
+  background: #f5f7f9;
+  padding: 8px 11px;
+  color: #53616e;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.setup-required.hard {
+  border-color: #f1c98e;
+  border-left-color: var(--warning, #f59f3a);
+  background: #fff8ed;
+  color: #b75c0c;
+}
+
+.setup-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-color: #dbe0e5;
+  background: #f5f7f9;
+  color: #53616e;
+}
+
+main[data-theme] .setup-required {
+  border-color: var(--line);
+  border-left-color: color-mix(in srgb, var(--muted) 60%, var(--line));
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+main[data-theme] .setup-required.hard {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--line));
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  color: var(--warning);
+}
+
+main[data-theme] .setup-notice {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+/* ---- Setup wizard --------------------------------------------------------
+   Every selector here is wiz-prefixed on purpose. The settings page already
+   owns .setup-steps and .setup-card, and .setup-steps div there is a flex row
+   with higher specificity than a plain class, so reusing those names silently
+   reflows this page. */
+
+/* Equal columns keep every connector the same length regardless of label width.
+   The connector is drawn as a pseudo-element behind each dot rather than as a
+   flex sibling, which is what made the old segments uneven. */
+.wiz-rail {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
+  margin: 0 0 18px;
+  padding: 0;
+  list-style: none;
+}
+
+.wiz-rail li {
+  position: relative;
+  min-width: 0;
+}
+
+/* 16px = button top padding (4) + half the 26px dot, minus half the line. */
+.wiz-rail li:not(:first-child)::before {
+  content: "";
+  position: absolute;
+  top: 16px;
+  right: 50%;
+  left: -50%;
+  height: 2px;
+  margin: 0 22px;
+  border-radius: 2px;
+  background: #e4e8ec;
+}
+
+/* The connector turns green only when the stage behind it is actually finished,
+   which is what `linked` tracks. */
+.wiz-rail li.linked:not(:first-child)::before {
+  background: color-mix(in srgb, var(--success, #20b58f) 55%, transparent);
+}
+
+/* The global button rule pins every button to 34px tall, which cropped the
+   label right out of this one. Anything here that is a button but not a
+   button-shaped control has to opt out of that height. */
+.wiz-rail button {
+  position: relative;
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  width: 100%;
+  height: auto;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  padding: 4px 2px 2px;
+  cursor: pointer;
+}
+
+.wiz-rail button:hover {
+  background: none;
+  border: none;
+  transform: none;
+  box-shadow: none;
+}
+
+.wiz-rail-dot {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2px solid #e4e8ec;
+  background: #ffffff;
+  color: #8a95a1;
+  font-size: 12px;
+  font-weight: 700;
+  transition:
+    background 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.wiz-rail-dot svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wiz-rail-label {
+  color: #8a95a1;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+  transition: color 180ms ease;
+}
+
+/* Complete and current are independent: the stage you are on can already be
+   done. Completion owns the dot's fill, and being current adds the ring, so the
+   two states stack instead of one masking the other. */
+.wiz-rail li.complete .wiz-rail-dot {
+  border-color: var(--success, #20b58f);
+  background: var(--success, #20b58f);
+  color: #ffffff;
+}
+
+.wiz-rail li.current:not(.complete) .wiz-rail-dot {
+  border-color: var(--accent, #0f8f8e);
+  background: var(--accent, #0f8f8e);
+  color: #ffffff;
+}
+
+.wiz-rail li.current .wiz-rail-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent, #0f8f8e) 18%, transparent);
+}
+
+.wiz-rail li.current.complete .wiz-rail-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success, #20b58f) 20%, transparent);
+}
+
+.wiz-rail li.current .wiz-rail-label {
+  color: #111820;
+}
+
+.wiz-rail li.complete:not(.current) .wiz-rail-label {
+  color: #53616e;
+}
+
+.wiz-rail button:hover .wiz-rail-label {
+  color: #111820;
+}
+
+.wiz-panel {
+  border: 1px solid #dbe0e5;
+  border-radius: 10px;
+  background: #ffffff;
+  padding: 22px 24px;
+  display: grid;
+  gap: 18px;
+  box-shadow: 0 1px 2px rgba(15, 23, 31, 0.04);
+}
+
+.wiz-head {
+  display: grid;
+  gap: 6px;
+}
+
+.wiz-head h3 {
+  margin: 0;
+  font-size: 17px;
+  color: #111820;
+}
+
+.wiz-head p {
+  margin: 0;
+  max-width: 72ch;
+  color: #53616e;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.wiz-placeholder {
+  border: 1px dashed #cfd6dd;
+  border-radius: 8px;
+  padding: 26px;
+  text-align: center;
+  color: #6b7785;
+  font-size: 14px;
+}
+
+.wiz-findings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.wiz-finding {
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  border: 1px solid #e4e8ec;
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 12px 14px;
+}
+
+.wiz-finding-label {
+  color: #8a95a1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.wiz-finding strong {
+  color: #111820;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.wiz-finding strong.wiz-bad {
+  color: var(--danger, #d63b45);
+}
+
+.wiz-finding strong.wiz-warn {
+  color: #b75c0c;
+}
+
+.wiz-finding-note {
+  color: #6b7785;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+
+/* Each task is its own card so the steps read as discrete units instead of one
+   undifferentiated column of text and buttons. */
+.wiz-task {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  border: 1px solid #e4e8ec;
+  border-radius: 10px;
+  background: #fafbfc;
+  padding: 15px 17px;
+  transition:
+    opacity 180ms ease,
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.wiz-task.muted {
+  opacity: 0.6;
+}
+
+.wiz-task.done {
+  border-color: color-mix(in srgb, var(--success, #20b58f) 32%, #e4e8ec);
+  background: color-mix(in srgb, var(--success, #20b58f) 6%, #fafbfc);
+}
+
+.wiz-task-mark {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #e9edf1;
+  color: #6b7785;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.wiz-task.done .wiz-task-mark {
+  background: var(--success, #20b58f);
+  color: #ffffff;
+}
+
+.wiz-task-mark svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wiz-task-body {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+}
+
+.wiz-task-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.wiz-task-title strong {
+  color: #111820;
+  font-size: 14px;
+}
+
+.wiz-state {
+  border-radius: 999px;
+  background: #e9edf1;
+  padding: 2px 9px;
+  color: #6b7785;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.wiz-state.ok {
+  background: color-mix(in srgb, var(--success, #20b58f) 16%, transparent);
+  color: #147a62;
+}
+
+.wiz-task-body > p {
+  margin: 0;
+  max-width: 74ch;
+  color: #6b7785;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.wiz-task-body em {
+  color: #3d4954;
+  font-style: normal;
+  font-weight: 600;
+}
+
+.wiz-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.wiz-select {
+  min-width: 165px;
+}
+
+.wiz-hint {
+  color: #8a95a1;
+  font-size: 12px;
+}
+
+/* The staged path is reference text, not an editable field. Showing it as a
+   read-only input made it the loudest thing on the card. */
+.wiz-path {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  border: 1px solid #e4e8ec;
+  border-radius: 7px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.wiz-path code {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 7px 10px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  color: #53616e;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.wiz-mini {
+  flex: 0 0 auto;
+  height: auto;
+  border: none;
+  border-left: 1px solid #e4e8ec;
+  border-radius: 0;
+  background: transparent;
+  padding: 0 12px;
+  color: #53616e;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 140ms ease, color 140ms ease;
+}
+
+.wiz-mini:hover {
+  background: #f2f5f7;
+  border-left-color: #e4e8ec;
+  color: #111820;
+  transform: none;
+  box-shadow: none;
+}
+
+.wiz-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wiz-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid rgba(32, 181, 143, 0.4);
+  border-radius: 999px;
+  background: rgba(32, 181, 143, 0.1);
+  padding: 4px 11px;
+  color: #147a62;
+  font-size: 12px;
+}
+
+.wiz-chip b {
+  font-weight: 700;
+}
+
+.wiz-chip.missing {
+  border-color: #f1c98e;
+  background: #fff8ed;
+  color: #b75c0c;
+}
+
+/* The global checkbox styling is sized for settings rows and dwarfs this one. */
+.wiz-check {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: #53616e;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.wiz-check input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  min-width: 0;
+  min-height: 0;
+  flex: 0 0 auto;
+  margin: 0;
+  accent-color: var(--accent, #0f8f8e);
+}
+
+.wiz-progress {
+  display: grid;
+  gap: 7px;
+  border: 1px solid #e4e8ec;
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 12px 14px;
+}
+
+.wiz-progress-row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+}
+
+.wiz-progress-body {
+  min-width: 0;
+}
+
+.wiz-progress-body strong {
+  color: #3d4954;
+  font-size: 13px;
+}
+
+.wiz-progress-body pre {
+  margin: 3px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #8a95a1;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.wiz-progress-mark {
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #c3ccd5;
+  animation: wiz-pulse 1.1s ease-in-out infinite;
+}
+
+.wiz-progress-row.done .wiz-progress-mark {
+  background: #20b58f;
+  animation: none;
+}
+
+.wiz-progress-row.failed .wiz-progress-mark {
+  background: var(--danger, #d63b45);
+  animation: none;
+}
+
+.wiz-progress-row.failed .wiz-progress-body strong {
+  color: var(--danger, #d63b45);
+}
+
+@keyframes wiz-pulse {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 1; }
+}
+
+.wiz-final-note {
+  border: 1px solid rgba(32, 181, 143, 0.4);
+  border-radius: 8px;
+  background: rgba(32, 181, 143, 0.08);
+  padding: 11px 13px;
+  color: #147a62;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.wiz-summary {
+  display: grid;
+  gap: 10px;
+}
+
+.wiz-summary-row {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  border: 1px solid #e4e8ec;
+  border-radius: 8px;
+  background: #fafbfc;
+  padding: 13px 15px;
+}
+
+.wiz-summary-row strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #111820;
+  font-size: 14px;
+}
+
+.wiz-summary-row p {
+  margin: 0;
+  color: #6b7785;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.wiz-summary-mark {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #c3ccd5;
+}
+
+.wiz-summary-row.done {
+  border-color: rgba(32, 181, 143, 0.36);
+  background: rgba(32, 181, 143, 0.07);
+}
+
+.wiz-summary-row.done .wiz-summary-mark {
+  background: #20b58f;
+}
+
+.wiz-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  border-top: 1px solid #eef1f4;
+  padding-top: 16px;
+}
+
+.wiz-foot-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.link-button {
+  height: auto;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent, #0f8f8e);
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.link-button:hover {
+  background: none;
+  border: none;
+  transform: none;
+  box-shadow: none;
+}
+
+/* ---- Guides page --------------------------------------------------------- */
+
+.guide-list {
+  display: grid;
+  gap: 14px;
+}
+
+.guide-card {
+  display: grid;
+  gap: 14px;
+}
+
+.guide-card header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.guide-card h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  color: #111820;
+}
+
+.guide-card header p {
+  margin: 0;
+  max-width: 62ch;
+  color: #53616e;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.guide-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: #8a95a1;
+  font-size: 12px;
+}
+
+.guide-tag {
+  border: 1px solid #dbe0e5;
+  border-radius: 999px;
+  background: #f5f7f9;
+  padding: 3px 10px;
+  color: #53616e;
+  font-weight: 600;
+}
+
+.guide-steps {
+  display: grid;
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.guide-steps li {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.guide-step-number {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: rgba(35, 210, 189, 0.16);
+  color: #0f8f8e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.guide-step-body {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  min-width: 0;
+}
+
+.guide-step-body p {
+  margin: 0;
+  max-width: 74ch;
+  color: #3d4954;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.guide-code {
+  margin: 0;
+  border: 1px solid #dbe0e5;
+  border-radius: 6px;
+  background: #f5f7f9;
+  padding: 8px 10px;
+  max-width: 100%;
+  overflow-x: auto;
+  color: #3d4954;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.guide-figure {
+  margin: 0;
+  max-width: 100%;
+}
+
+.guide-figure img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid #dbe0e5;
+  border-radius: 8px;
+}
+
+.guide-figure figcaption {
+  margin-top: 5px;
+  color: #8a95a1;
+  font-size: 12px;
+}
+
+/* ---- Setup and Guides under the theme system -----------------------------
+   The base rules above are written against the default light palette. Every
+   themed palette (including Dark, Cream and Barbie) comes in through
+   main[data-theme], so all hardcoded colours have to be re-pointed at the
+   variables here or the pages keep dark text on dark panels. */
+
+main[data-theme] .wiz-panel {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 10px 26px var(--shadow);
+}
+
+main[data-theme] .wiz-head h3,
+main[data-theme] .wiz-finding strong,
+main[data-theme] .wiz-task-body > strong,
+main[data-theme] .wiz-summary-row strong,
+main[data-theme] .guide-card h3 {
+  color: var(--text-strong);
+}
+
+main[data-theme] .wiz-head p,
+main[data-theme] .wiz-task-body > p,
+main[data-theme] .wiz-summary-row p,
+main[data-theme] .guide-card header p,
+main[data-theme] .guide-step-body p {
+  color: var(--muted);
+}
+
+/* main[data-theme] button gives every button a surface background, and it ties
+   this rule on specificity while coming later in the file. Without an explicit
+   reset each rail step paints as a filled cell and the rail reads as a
+   segmented bar instead of dots on a connector. */
+main[data-theme] .wiz-rail button,
+main[data-theme] .wiz-rail button:hover,
+main[data-theme] .link-button,
+main[data-theme] .link-button:hover {
+  border: none;
+  background: none;
+  box-shadow: none;
+  transform: none;
+}
+
+main[data-theme] .wiz-mini,
+main[data-theme] .wiz-mini:hover {
+  box-shadow: none;
+  transform: none;
+}
+
+main[data-theme] .wiz-rail li:not(:first-child)::before {
+  background: var(--line);
+}
+
+main[data-theme] .wiz-rail li.linked:not(:first-child)::before {
+  background: color-mix(in srgb, var(--success) 55%, transparent);
+}
+
+main[data-theme] .wiz-rail-dot {
+  border-color: var(--line);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-rail li.complete .wiz-rail-dot {
+  border-color: var(--success);
+  background: var(--success);
+  color: var(--surface);
+}
+
+main[data-theme] .wiz-rail li.current:not(.complete) .wiz-rail-dot {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--surface);
+}
+
+main[data-theme] .wiz-rail li.current .wiz-rail-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+main[data-theme] .wiz-rail li.current.complete .wiz-rail-dot {
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--success) 22%, transparent);
+}
+
+main[data-theme] .wiz-rail li.current .wiz-rail-label,
+main[data-theme] .wiz-rail button:hover .wiz-rail-label {
+  color: var(--text-strong);
+}
+
+main[data-theme] .wiz-rail-label {
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-rail li.complete:not(.current) .wiz-rail-label {
+  color: var(--text);
+}
+
+main[data-theme] .wiz-placeholder {
+  border-color: var(--line-strong);
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-finding,
+main[data-theme] .wiz-progress,
+main[data-theme] .wiz-summary-row {
+  border-color: var(--line);
+  background: var(--surface-soft);
+}
+
+main[data-theme] .wiz-finding-label,
+main[data-theme] .wiz-finding-note,
+main[data-theme] .guide-meta,
+main[data-theme] .guide-figure figcaption {
+  color: var(--muted);
+}
+
+
+main[data-theme] .wiz-finding strong.wiz-bad {
+  color: var(--danger);
+}
+
+main[data-theme] .wiz-finding strong.wiz-warn {
+  color: var(--warning);
+}
+
+main[data-theme] .wiz-task {
+  border-color: var(--line);
+  background: var(--surface-soft);
+}
+
+main[data-theme] .wiz-task.done {
+  border-color: color-mix(in srgb, var(--success) 34%, var(--line));
+  background: color-mix(in srgb, var(--success) 8%, var(--surface-soft));
+}
+
+main[data-theme] .wiz-task-mark {
+  background: color-mix(in srgb, var(--line) 60%, var(--surface));
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-task.done .wiz-task-mark {
+  background: var(--success);
+  color: var(--surface);
+}
+
+main[data-theme] .wiz-task-title strong {
+  color: var(--text-strong);
+}
+
+main[data-theme] .wiz-state {
+  background: color-mix(in srgb, var(--line) 60%, var(--surface));
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-state.ok {
+  background: color-mix(in srgb, var(--success) 18%, transparent);
+  color: var(--success);
+}
+
+main[data-theme] .wiz-task-body em {
+  color: var(--text);
+}
+
+main[data-theme] .wiz-hint {
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-path {
+  border-color: var(--line);
+  background: var(--surface);
+}
+
+main[data-theme] .wiz-path code {
+  color: var(--text);
+}
+
+main[data-theme] .wiz-mini {
+  border-left-color: var(--line);
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-mini:hover {
+  background: var(--surface-soft);
+  color: var(--text-strong);
+}
+
+main[data-theme] .wiz-chip {
+  color: var(--success);
+}
+
+main[data-theme] .wiz-chip {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  background: color-mix(in srgb, var(--success) 12%, var(--surface));
+}
+
+main[data-theme] .wiz-chip.missing {
+  border-color: color-mix(in srgb, var(--warning) 48%, var(--line));
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  color: var(--warning);
+}
+
+main[data-theme] .wiz-check {
+  color: var(--text);
+}
+
+main[data-theme] .wiz-progress-body strong {
+  color: var(--text);
+}
+
+main[data-theme] .wiz-progress-body pre {
+  color: var(--muted);
+}
+
+main[data-theme] .wiz-progress-mark {
+  background: var(--line-strong);
+}
+
+main[data-theme] .wiz-progress-row.done .wiz-progress-mark {
+  background: var(--success);
+}
+
+main[data-theme] .wiz-progress-row.failed .wiz-progress-mark,
+main[data-theme] .wiz-progress-row.failed .wiz-progress-body strong {
+  background: none;
+  color: var(--danger);
+}
+
+main[data-theme] .wiz-progress-row.failed .wiz-progress-mark {
+  background: var(--danger);
+}
+
+main[data-theme] .wiz-final-note {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+  color: var(--success);
+}
+
+main[data-theme] .wiz-summary-mark {
+  background: var(--line-strong);
+}
+
+main[data-theme] .wiz-summary-row.done {
+  border-color: color-mix(in srgb, var(--success) 40%, var(--line));
+  background: color-mix(in srgb, var(--success) 9%, var(--surface));
+}
+
+main[data-theme] .wiz-summary-row.done .wiz-summary-mark {
+  background: var(--success);
+}
+
+main[data-theme] .wiz-foot {
+  border-top-color: var(--line);
+}
+
+main[data-theme] .link-button {
+  color: var(--accent);
+}
+
+main[data-theme] .guide-tag {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+main[data-theme] .guide-step-number {
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  color: var(--accent);
+}
+
+main[data-theme] .guide-code {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--text);
+}
+
+main[data-theme] .guide-figure img {
+  border-color: var(--line);
+}
+
+main[data-theme] .wiz-path input {
+  color: var(--text);
 }

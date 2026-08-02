@@ -2,6 +2,7 @@
 
 #include "browser_bridge.h"
 #include "clipboard_history.h"
+#include "discord_bridge.h"
 #include "media_sessions.h"
 
 #include <nlohmann/json.hpp>
@@ -110,6 +111,11 @@ std::string ControlPipe::dispatchCommand(const std::string& body) {
             json out;
             out["ok"] = true;
             out["status"] = wideToUtf8(describeMediaTargets());
+            response = out.dump();
+        } else if (command == "discord_status") {
+            json out;
+            out["ok"] = true;
+            out["clients"] = static_cast<int>(discordBridgeClientCount());
             response = out.dump();
         } else if (command == "browser_status") {
             json out;

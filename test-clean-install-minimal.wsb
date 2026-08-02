@@ -1,0 +1,14 @@
+<Configuration>
+  <!--
+    Fallback: a bare sandbox with no folder mapping and no logon command.
+
+    If the full test-clean-install.wsb still fails, run this one. It isolates
+    the question: if this works, the problem is in that file's mapping or logon
+    command; if this also fails, the problem is Windows Sandbox itself and the
+    .wsb is innocent.
+
+    With no mapping, copy the installer in by dragging it onto the sandbox
+    window, or paste it from the host clipboard.
+  -->
+  <Networking>Default</Networking>
+</Configuration>

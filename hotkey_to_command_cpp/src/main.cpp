@@ -1,6 +1,11 @@
 // main.cpp -- configurable hotkey daemon.
-// The main thread owns RegisterHotKey/GetMessage. The pipe thread only posts
-// control messages back here so reloads happen on the same thread as hotkeys.
+// The main thread owns the Raw Input sink window and GetMessage. The pipe
+// thread only posts control messages back here so reloads happen on the same
+// thread as hotkeys.
+//
+// Key detection is Raw Input only (WM_INPUT with RIDEV_INPUTSINK). The daemon
+// never calls RegisterHotKey or SetWindowsHookEx, so it stays a passive
+// observer of the keyboard instead of an input path anti-cheat drivers block.
 
 #include <windows.h>
 #include <cstdio>
@@ -13,13 +18,14 @@
 #include "config.h"
 #include "control_pipe.h"
 #include "discord_bridge.h"
+#include "display_state.h"
 #include "hotkey_registry.h"
+#include "media_sessions.h"
 
 static constexpr UINT WM_HOTKEYD_RELOAD = WM_APP + 1;
 static constexpr UINT WM_HOTKEYD_QUIT = WM_APP + 2;
 static constexpr UINT WM_HOTKEYD_SUSPEND = WM_APP + 3;
 static constexpr UINT WM_HOTKEYD_RESUME = WM_APP + 4;
-static constexpr int QUIT_HOTKEY_ID = 9000;
 static constexpr wchar_t kSingleInstanceMutex[] = L"Local\\HotkeyToCommandHotkeyd";
 static constexpr wchar_t kRawInputWindowClass[] = L"HotkeyToCommandRawInputSink";
 
@@ -49,6 +55,8 @@ static void handleRawInput(HotkeyRegistry& registry, HRAWINPUT input) {
 
     const bool pressed = (keyboard.Flags & RI_KEY_BREAK) == 0;
     registry.dispatchRawKey(keyboard.VKey, pressed, raw->header.hDevice);
+
+    if (registry.consumeQuitRequest()) PostQuitMessage(0);
 }
 
 static LRESULT CALLBACK rawInputWindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -75,7 +83,7 @@ static HWND createRawInputWindow(HotkeyRegistry& registry, std::wstring& status)
     wc.lpszClassName = kRawInputWindowClass;
 
     if (!RegisterClassW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        status = L"raw input fallback unavailable: RegisterClass failed\n";
+        status = L"raw input unavailable: RegisterClass failed\n";
         return nullptr;
     }
 
@@ -94,10 +102,13 @@ static HWND createRawInputWindow(HotkeyRegistry& registry, std::wstring& status)
         &registry);
 
     if (!hwnd) {
-        status = L"raw input fallback unavailable: message window failed\n";
+        status = L"raw input unavailable: message window failed\n";
         return nullptr;
     }
 
+    // usUsagePage 0x01 / usUsage 0x06 is the HID generic-desktop keyboard page.
+    // RIDEV_INPUTSINK keeps WM_INPUT flowing to this message-only window even
+    // while a game owns the foreground.
     RAWINPUTDEVICE device{};
     device.usUsagePage = 0x01;
     device.usUsage = 0x06;
@@ -106,11 +117,11 @@ static HWND createRawInputWindow(HotkeyRegistry& registry, std::wstring& status)
 
     if (!RegisterRawInputDevices(&device, 1, sizeof(device))) {
         DestroyWindow(hwnd);
-        status = L"raw input fallback unavailable: RegisterRawInputDevices failed\n";
+        status = L"raw input unavailable: RegisterRawInputDevices failed\n";
         return nullptr;
     }
 
-    status = L"raw input fallback armed: keyboard RIDEV_INPUTSINK\n";
+    status = L"raw input armed: keyboard RIDEV_INPUTSINK\n";
     return hwnd;
 }
 
@@ -135,6 +146,8 @@ static std::wstring getStatus(DaemonState& state) {
     status += std::wstring(L"daemon elevated: ") + (elevated ? L"yes\n" : L"no\n");
     std::wstring event = state.registry.lastEvent();
     if (!event.empty()) status += event + L"\n";
+    status += state.registry.rawInputDebugStatus();
+    status += describeOverlayVisibility();
     return status;
 }
 
@@ -176,12 +189,20 @@ int main() {
 
     DaemonState state;
 
-    RegisterHotKey(nullptr, QUIT_HOTKEY_ID, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q');
     wprintf(L"hotkeyd starting\n");
     HWND rawInputWindow = createRawInputWindow(state.registry, state.rawInputStatus);
+    if (!rawInputWindow) {
+        wprintf(L"%s", state.rawInputStatus.c_str());
+        wprintf(L"no key detection backend available, exiting\n");
+        ReleaseMutex(singleInstance);
+        CloseHandle(singleInstance);
+        return 1;
+    }
     startDiscordBridge();
     startBrowserMediaBridge();
     startClipboardHistory();
+    warmMediaOverlay();
+    startMediaTargetPolling();
 
     loadAndApply(state, false);
 
@@ -213,8 +234,8 @@ int main() {
         }
 
         if (msg.message == WM_HOTKEYD_SUSPEND) {
-            // Temporarily release all global hotkeys so the UI can record a combo
-            // that is currently in use (RegisterHotKey otherwise swallows it).
+            // Stop matching bindings so the UI can record a combo that is
+            // already bound without firing its action.
             state.registry.clear();
             setStatus(state, L"hotkeys suspended for rebinding\n");
             continue;
@@ -224,12 +245,6 @@ int main() {
             std::wstring status = state.registry.apply(state.activeConfig);
             status += state.rawInputStatus;
             setStatus(state, status);
-            continue;
-        }
-
-        if (msg.message == WM_HOTKEY) {
-            if (static_cast<int>(msg.wParam) == QUIT_HOTKEY_ID) break;
-            state.registry.dispatch(msg.wParam);
             continue;
         }
 
@@ -243,12 +258,12 @@ int main() {
     }
 
     pipe.stop();
+    stopMediaTargetPolling();
     stopClipboardHistory();
     stopBrowserMediaBridge();
     stopDiscordBridge();
     state.registry.clear();
     if (rawInputWindow) DestroyWindow(rawInputWindow);
-    UnregisterHotKey(nullptr, QUIT_HOTKEY_ID);
     ReleaseMutex(singleInstance);
     CloseHandle(singleInstance);
     wprintf(L"bye\n");
