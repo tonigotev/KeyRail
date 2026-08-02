@@ -15,7 +15,7 @@ make those bindings work in places other hotkey tools give up on.
 ## Install
 
 Download the installer from
-[Releases](https://github.com/tonigotev/Custom-hotkey-software/releases). It is a
+[Releases](https://github.com/tonigotev/KeyRail/releases). It is a
 per-user install with no UAC prompt.
 
 The installer is unsigned, so SmartScreen will warn on first run: **More info â†’

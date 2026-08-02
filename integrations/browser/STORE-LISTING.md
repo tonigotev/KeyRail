@@ -49,7 +49,7 @@ Page access is used solely to read media playback state and issue playback
 commands.
 
 Requires the KeyRail desktop app for Windows:
-https://github.com/tonigotev/Custom-hotkey-software
+https://github.com/tonigotev/KeyRail
 ```
 
 ### Category
@@ -99,8 +99,8 @@ currently has nothing to list because no media is playing. To produce one:
 | Field | Value |
 | --- | --- |
 | Official URL | `None` â€” needs Search Console domain verification, skip it |
-| Homepage URL | `https://github.com/tonigotev/Custom-hotkey-software` |
-| Support URL | `https://github.com/tonigotev/Custom-hotkey-software/issues` |
+| Homepage URL | `https://github.com/tonigotev/KeyRail` |
+| Support URL | `https://github.com/tonigotev/KeyRail/issues` |
 | Mature content | Off |
 
 ---
