@@ -1,6 +1,6 @@
 # OutputDeviceBridge Vencord Userplugin
 
-This plugin connects Discord/Vencord to the Hotkey To Command daemon.
+This plugin connects Discord/Vencord to the KeyRail daemon.
 
 ## Install
 
@@ -26,13 +26,13 @@ Settings -> Vencord -> Plugins
 
 ## Test
 
-Start Hotkey To Command. The daemon listens on:
+Start KeyRail. The daemon listens on:
 
 ```text
 ws://127.0.0.1:8787
 ```
 
-In Hotkey To Command, bind a hotkey to one of:
+In KeyRail, bind a hotkey to one of:
 
 ```text
 Cycle Discord output

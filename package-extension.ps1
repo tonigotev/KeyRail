@@ -64,7 +64,7 @@ if ($Version) {
     $manifest | ConvertTo-Json -Depth 10 | Set-Content $manifestPath -Encoding utf8
 }
 
-$zip = Join-Path $dist "hotkey-to-command-media-bridge-$($manifest.version).zip"
+$zip = Join-Path $dist "keyrail-media-bridge-$($manifest.version).zip"
 if (Test-Path $zip) { Remove-Item $zip -Force }
 
 # Built entry by entry rather than with Compress-Archive, which writes Windows

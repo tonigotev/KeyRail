@@ -1,7 +1,7 @@
 USING THE MEDIA BRIDGE FROM YOUR OWN APP
 ========================================
 
-The extension is not tied to Hotkey To Command by anything except a URL. It is a
+The extension is not tied to KeyRail by anything except a URL. It is a
 WebSocket *client*: on startup it dials a server on the local machine and speaks
 a small JSON protocol. Anything that binds that port and speaks the protocol gets
 a live list of browser tabs playing media, and can control them.
@@ -28,7 +28,7 @@ On connect the extension sends:
     "id": "extension-1",
     "type": "hello",
     "payload": {
-      "name": "Hotkey To Command Media Bridge",
+      "name": "KeyRail Media Bridge",
       "version": "0.1.0",
       "app": "Brave"
     }
@@ -121,7 +121,7 @@ THINGS THAT WILL BITE YOU
 
 Port 8790 is hardcoded in the extension and there is no options page. If two
 apps using this extension are installed, only whichever binds the port first
-gets a connection. If you expect to coexist with Hotkey To Command, fork the
+gets a connection. If you expect to coexist with KeyRail, fork the
 extension and change WS_URL in background.js, then publish your own listing.
 
 There is no authentication. Any local process that binds 8790 before the real

@@ -1,4 +1,4 @@
-﻿# Raw Input Keyboard Detector
+# Raw Input Keyboard Detector
 
 Small standalone Win32 proof of concept that observes keyboard input using only
 the Raw Input API (`WM_INPUT`). It creates a message-only window, registers for

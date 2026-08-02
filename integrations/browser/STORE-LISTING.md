@@ -1,4 +1,4 @@
-# Chrome Web Store listing — field by field
+# Chrome Web Store listing â€” field by field
 
 Rebuild the upload package with `.\package-extension.ps1` (add `-Version 0.1.1`
 for a resubmission; both stores reject an upload whose version has not risen).
@@ -12,12 +12,12 @@ Generated graphics live in `integrations\browser\store-assets\`.
 ### Description
 
 Paste verbatim. The first paragraph exists because this extension does nothing
-on its own — reviewers and users both need that stated before anything else, or
+on its own â€” reviewers and users both need that stated before anything else, or
 it reads as broken.
 
 ```text
-This extension is the browser half of Hotkey To Command, a Windows app that maps
-keyboard shortcuts to system actions. It does nothing on its own — install the
+This extension is the browser half of KeyRail, a Windows app that maps
+keyboard shortcuts to system actions. It does nothing on its own â€” install the
 desktop app first.
 
 Windows only reports one media session per browser, so a normal media key hits
@@ -27,10 +27,10 @@ another and something autoplaying in a third, you cannot reach the one you want.
 This bridge fixes that. It reports each tab that is playing audio or video to the
 desktop app, so you can:
 
-• See every playing tab in a picker and choose one with a hotkey
-• Play, pause and skip that specific tab, even while a game or another app is
+â€¢ See every playing tab in a picker and choose one with a hotkey
+â€¢ Play, pause and skip that specific tab, even while a game or another app is
   focused
-• Keep controlling the tab you picked, instead of whatever grabbed media focus
+â€¢ Keep controlling the tab you picked, instead of whatever grabbed media focus
   last
 
 How it works
@@ -44,11 +44,11 @@ that page's own media element.
 Privacy
 
 Nothing leaves your computer. There are no servers, no accounts, no analytics and
-no tracking. The only destination is the Hotkey To Command app running locally.
+no tracking. The only destination is the KeyRail app running locally.
 Page access is used solely to read media playback state and issue playback
 commands.
 
-Requires the Hotkey To Command desktop app for Windows:
+Requires the KeyRail desktop app for Windows:
 https://github.com/tonigotev/Custom-hotkey-software
 ```
 
@@ -72,10 +72,10 @@ English (United States)
 
 | Field | File | Notes |
 | --- | --- | --- |
-| Store icon (128×128) | `integrations\browser\store-assets\store-icon-128.png` | Required |
-| Screenshot (1280×800) | see below | Required, at least one |
-| Small promo tile (440×280) | `integrations\browser\store-assets\promo-small-440x280.png` | Optional |
-| Marquee promo tile (1400×560) | `integrations\browser\store-assets\promo-marquee-1400x560.png` | Optional, only used if featured |
+| Store icon (128Ã—128) | `integrations\browser\store-assets\store-icon-128.png` | Required |
+| Screenshot (1280Ã—800) | see below | Required, at least one |
+| Small promo tile (440Ã—280) | `integrations\browser\store-assets\promo-small-440x280.png` | Optional |
+| Marquee promo tile (1400Ã—560) | `integrations\browser\store-assets\promo-marquee-1400x560.png` | Optional, only used if featured |
 | Global promo video | leave empty | |
 
 Promo tiles are generated as 24-bit PNG with no alpha channel, which the store
@@ -89,7 +89,7 @@ currently has nothing to list because no media is playing. To produce one:
 1. Start playback in two or three browser tabs (a music tab and a video tab show
    the point best).
 2. Press the media picker hotkey so the overlay appears.
-3. Capture it, then say the word and it can be composited onto a clean 1280×800
+3. Capture it, then say the word and it can be composited onto a clean 1280Ã—800
    backdrop so none of the desktop is exposed.
 
 ---
@@ -98,7 +98,7 @@ currently has nothing to list because no media is playing. To produce one:
 
 | Field | Value |
 | --- | --- |
-| Official URL | `None` — needs Search Console domain verification, skip it |
+| Official URL | `None` â€” needs Search Console domain verification, skip it |
 | Homepage URL | `https://github.com/tonigotev/Custom-hotkey-software` |
 | Support URL | `https://github.com/tonigotev/Custom-hotkey-software/issues` |
 | Mature content | Off |
@@ -110,7 +110,7 @@ currently has nothing to list because no media is playing. To produce one:
 ### Single purpose
 
 ```text
-Report which browser tabs are playing media to the Hotkey To Command desktop app,
+Report which browser tabs are playing media to the KeyRail desktop app,
 and play, pause or skip the tab the user selects.
 ```
 
@@ -161,8 +161,8 @@ instead of rescanning on open.
 ```text
 Media can play on any website, and the user chooses which tab to control, so the
 set of relevant sites cannot be known in advance. The extension reads only media
-playback state — title, artist, playing or paused, and which playback controls
-the page exposes — and does not read or transmit other page content.
+playback state â€” title, artist, playing or paused, and which playback controls
+the page exposes â€” and does not read or transmit other page content.
 ```
 
 **Remote code**

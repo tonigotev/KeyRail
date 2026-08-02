@@ -204,7 +204,7 @@ function connect() {
 
 export default definePlugin({
     name: "OutputDeviceBridge",
-    description: "Connects to Hotkey To Command and lets it cycle/set Discord's output and input devices.",
+    description: "Connects to KeyRail and lets it cycle/set Discord's output and input devices.",
     authors: [{ name: "Antonio", id: 0n }],
     settings,
 

@@ -1,10 +1,10 @@
-﻿# Hotkey To Command Media Bridge
+# KeyRail Media Bridge
 
 Browser extension bridge for listing and controlling media inside Brave/Chrome tabs.
 
 ## Install for development
 
-1. Start `hotkeyd.exe`.
+1. Start `keyraild.exe`.
 2. Open `brave://extensions`.
 3. Enable **Developer mode**.
 4. Click **Load unpacked**.

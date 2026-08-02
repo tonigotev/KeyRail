@@ -1,6 +1,6 @@
 (function () {
-  if (window.__hotkeyToCommandMediaBridgeLoaded) return;
-  window.__hotkeyToCommandMediaBridgeLoaded = true;
+  if (window.__keyRailMediaBridgeLoaded) return;
+  window.__keyRailMediaBridgeLoaded = true;
 
   const MEDIA_ID_ATTR = "data-hotkey-to-command-media-id";
   let nextMediaId = 1;

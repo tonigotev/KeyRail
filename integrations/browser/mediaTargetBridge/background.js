@@ -381,7 +381,7 @@ function scanFrameMedia() {
       // Only treat an element as a real target if it is actually engaged: currently
       // playing, or paused after having been played (currentTime > 0). A merely
       // loaded/preloaded element (readyState or duration set but never started) is
-      // NOT a media target — that is what made idle YouTube tabs get detected.
+      // NOT a media target â€” that is what made idle YouTube tabs get detected.
       return (!element.paused && !element.ended) || element.currentTime > 0;
     });
     const playingElement = usable.find((element) => !element.paused && !element.ended);
@@ -1004,7 +1004,7 @@ function controlFrameMedia(action) {
 
     if (action === "next" || action === "previous") {
       const handlerAction = action === "next" ? "nexttrack" : "previoustrack";
-      const captured = window.__hotkeydMedia;
+      const captured = window.__keyraildMedia;
       if (captured?.has?.(handlerAction)) {
         const result = captured.invoke(handlerAction);
         if (result?.ok) {

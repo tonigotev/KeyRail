@@ -1,0 +1,4 @@
+C:/Users/boris/Documents/hotkeys stuff/keyrail_daemon/build/CMakeFiles/keyraild.dir
+C:/Users/boris/Documents/hotkeys stuff/keyrail_daemon/build/CMakeFiles/media_list.dir
+C:/Users/boris/Documents/hotkeys stuff/keyrail_daemon/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/boris/Documents/hotkeys stuff/keyrail_daemon/build/CMakeFiles/ZERO_CHECK.dir

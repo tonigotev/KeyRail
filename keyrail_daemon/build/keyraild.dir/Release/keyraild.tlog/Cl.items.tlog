@@ -1,0 +1,14 @@
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\main.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\main.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\action_factory.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\action_factory.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\app_audio.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\app_audio.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\audio.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\audio.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\browser_bridge.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\browser_bridge.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\clipboard_history.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\clipboard_history.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\config.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\config.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\control_pipe.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\control_pipe.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\discord_bridge.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\discord_bridge.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\display_state.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\display_state.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\hotkey.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\hotkey.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\hotkey_registry.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\hotkey_registry.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\media_sessions.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\media_sessions.obj
+C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\src\synthetic_hotkey_suppression.cpp;C:\Users\boris\Documents\hotkeys stuff\keyrail_daemon\build\keyraild.dir\Release\synthetic_hotkey_suppression.obj

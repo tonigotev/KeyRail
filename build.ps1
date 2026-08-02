@@ -1,13 +1,13 @@
 <#
 .SYNOPSIS
-    Builds Hotkey To Command and drops the runnable exes into dist\.
+    Builds KeyRail and drops the runnable exes into dist\.
 
 .DESCRIPTION
-    By default this builds only the C++ daemon (hotkeyd.exe), which takes a few
+    By default this builds only the C++ daemon (keyraild.exe), which takes a few
     seconds. Pass -All to also build the Tauri settings UI, which takes several
     minutes on a cold Rust build.
 
-    A running hotkeyd.exe holds a lock on its own file, so the script stops the
+    A running keyraild.exe holds a lock on its own file, so the script stops the
     daemon through its control pipe before building and starts the new build
     again afterwards.
 
@@ -40,9 +40,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
-$cppDir = Join-Path $root "hotkey_to_command_cpp"
+$cppDir = Join-Path $root "keyrail_daemon"
 $cppBuildDir = Join-Path $cppDir "build"
-$uiDir = Join-Path $root "hotkey_to_command_ui"
+$uiDir = Join-Path $root "keyrail_ui"
 $distDir = Join-Path $root "dist"
 
 # Windows PowerShell turns any stderr output from a native exe into a terminating
@@ -93,11 +93,11 @@ function Resolve-CMake {
 # Ask the daemon to quit through its own control pipe. Returns $true when a
 # daemon was running, so the script knows whether to start one again later.
 function Stop-Daemon {
-    $running = @(Get-Process hotkeyd -ErrorAction SilentlyContinue)
+    $running = @(Get-Process keyraild -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return $false }
 
     try {
-        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "hotkeyd-control", [System.IO.Pipes.PipeDirection]::InOut)
+        $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "keyrail-control", [System.IO.Pipes.PipeDirection]::InOut)
         $pipe.Connect(3000)
         $pipe.ReadMode = [System.IO.Pipes.PipeTransmissionMode]::Message
         $bytes = [System.Text.Encoding]::UTF8.GetBytes('{"command":"quit"}')
@@ -123,7 +123,7 @@ function Stop-Daemon {
 # The settings UI has no control channel, so rebuilding it means closing it.
 # Only -All rebuilds the UI, so this never fires on a plain daemon build.
 function Stop-Ui {
-    $running = @(Get-Process hotkey_to_command_ui -ErrorAction SilentlyContinue)
+    $running = @(Get-Process keyrail_ui -ErrorAction SilentlyContinue)
     if ($running.Count -eq 0) { return $false }
     Write-Note "closing the settings UI so its exe can be replaced"
     foreach ($process in $running) {
@@ -166,7 +166,7 @@ Invoke-Native -What "daemon build" -Action { & $cmake --build $cppBuildDir --con
 
 if (-not (Test-Path $distDir)) { New-Item -ItemType Directory -Path $distDir | Out-Null }
 
-$daemonExe = Join-Path $cppBuildDir "$Configuration\hotkeyd.exe"
+$daemonExe = Join-Path $cppBuildDir "$Configuration\keyraild.exe"
 $copied = Copy-ToDist $daemonExe
 if ($copied) { $built += $copied }
 $copied = Copy-ToDist (Join-Path $cppBuildDir "$Configuration\media_list.exe")
@@ -188,7 +188,7 @@ if ($All) {
     # falls back to walking up to the build tree.
     $stageDir = Join-Path $uiDir "src-tauri\binaries"
     New-Item -ItemType Directory -Force $stageDir | Out-Null
-    foreach ($name in @("hotkeyd.exe", "media_list.exe")) {
+    foreach ($name in @("keyraild.exe", "media_list.exe")) {
         $source = Join-Path $cppBuildDir "$Configuration\$name"
         if (-not (Test-Path $source)) { throw "$name is missing; the daemon build must run before the UI build" }
         Copy-Item $source -Destination $stageDir -Force
@@ -209,7 +209,7 @@ if ($All) {
     }
 
     $uiRelease = Join-Path $uiDir "src-tauri\target\release"
-    $uiExe = Join-Path $uiRelease "hotkey_to_command_ui.exe"
+    $uiExe = Join-Path $uiRelease "keyrail_ui.exe"
     $copied = Copy-ToDist $uiExe
     if ($copied) { $built += $copied }
     if ($uiWasRunning) {
@@ -217,7 +217,7 @@ if ($All) {
         Start-Process -FilePath $uiExe
     }
 
-    # The UI looks for hotkeyd.exe next to itself first, so dist\ works as a
+    # The UI looks for keyraild.exe next to itself first, so dist\ works as a
     # self-contained folder you can copy anywhere.
     foreach ($installer in @("bundle\nsis", "bundle\msi")) {
         $dir = Join-Path $uiRelease $installer
@@ -236,10 +236,10 @@ if ($wasRunning -and -not $NoRestart) {
     Write-Step "Restarting the daemon"
     Start-Process -FilePath $daemonExe
     Start-Sleep -Milliseconds 800
-    if (Get-Process hotkeyd -ErrorAction SilentlyContinue) {
-        Write-Note "hotkeyd is running again"
+    if (Get-Process keyraild -ErrorAction SilentlyContinue) {
+        Write-Note "keyraild is running again"
     } else {
-        Write-Warning "hotkeyd did not stay running. Start it from the UI to see why."
+        Write-Warning "keyraild did not stay running. Start it from the UI to see why."
     }
 } elseif ($wasRunning) {
     Write-Note "daemon left stopped (-NoRestart)"

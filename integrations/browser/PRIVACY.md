@@ -1,8 +1,8 @@
-# Privacy Policy for Hotkey To Command Media Bridge
+# Privacy Policy for KeyRail Media Bridge
 
 Effective date: August 2, 2026
 
-Hotkey To Command Media Bridge is a browser extension for the Hotkey To Command Windows desktop application. Its purpose is to let the desktop app detect and control media playback in individual browser tabs selected by the user.
+KeyRail Media Bridge is a browser extension for the KeyRail Windows desktop application. Its purpose is to let the desktop app detect and control media playback in individual browser tabs selected by the user.
 
 ## Data handled by the extension
 
@@ -25,14 +25,14 @@ This information may fall under Chrome Web Store categories such as web history 
 The extension uses this information only to:
 
 - Detect which browser tabs are currently playing or exposing media
-- Send the list of media tabs to the Hotkey To Command desktop app running on the same computer
+- Send the list of media tabs to the KeyRail desktop app running on the same computer
 - Run the user-requested media command, such as play, pause, next, or previous, in the selected tab
 - Keep the extension connected to the local desktop app
 - Display extension connection and scan status in the extension popup
 
 ## Where the data is sent
 
-The extension sends media tab information only to the Hotkey To Command desktop app on the same computer using the local WebSocket address `ws://127.0.0.1:8790`.
+The extension sends media tab information only to the KeyRail desktop app on the same computer using the local WebSocket address `ws://127.0.0.1:8790`.
 
 The extension does not send this data to any remote server controlled by us.
 
@@ -46,7 +46,7 @@ The extension does not store passwords, authentication tokens, payment informati
 
 We do not sell user data.
 
-We do not transfer user data to third parties except as necessary for the extension's single purpose of communicating with the local Hotkey To Command desktop app on the user's own computer.
+We do not transfer user data to third parties except as necessary for the extension's single purpose of communicating with the local KeyRail desktop app on the user's own computer.
 
 We do not use user data for advertising, creditworthiness, lending, analytics, tracking, or unrelated purposes.
 
@@ -66,3 +66,4 @@ We may update this privacy policy when the extension's behavior changes. The lat
 
 ## Contact
 
+For privacy questions, contact the developer through the GitHub repository where this privacy policy is published.

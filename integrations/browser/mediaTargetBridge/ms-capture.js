@@ -1,8 +1,8 @@
 (() => {
   const TTL_MS = 30000;
 
-  if (window.__hotkeydMedia?.renew) {
-    window.__hotkeydMedia.renew(TTL_MS);
+  if (window.__keyraildMedia?.renew) {
+    window.__keyraildMedia.renew(TTL_MS);
     return;
   }
 
@@ -14,7 +14,7 @@
     || (navigator.mediaSession && Object.getPrototypeOf(navigator.mediaSession));
 
   if (!proto || typeof proto.setActionHandler !== "function") return;
-  if (proto.setActionHandler.__hotkeydWrapped) return;
+  if (proto.setActionHandler.__keyraildWrapped) return;
 
   const original = proto.setActionHandler;
 
@@ -33,9 +33,9 @@
     }
 
     try {
-      delete window.__hotkeydMedia;
+      delete window.__keyraildMedia;
     } catch {
-      window.__hotkeydMedia = undefined;
+      window.__keyraildMedia = undefined;
     }
   }
 
@@ -71,17 +71,17 @@
   };
 
   try {
-    Object.defineProperty(wrapped, "__hotkeydWrapped", { value: true });
+    Object.defineProperty(wrapped, "__keyraildWrapped", { value: true });
   } catch {
   }
 
   try {
-    Object.defineProperty(window, "__hotkeydMedia", {
+    Object.defineProperty(window, "__keyraildMedia", {
       configurable: true,
       value: api
     });
   } catch {
-    window.__hotkeydMedia = api;
+    window.__keyraildMedia = api;
   }
 
   proto.setActionHandler = wrapped;

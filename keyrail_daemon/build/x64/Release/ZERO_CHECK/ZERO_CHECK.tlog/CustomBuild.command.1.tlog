@@ -1,0 +1,10 @@
+^C:\USERS\BORIS\DOCUMENTS\HOTKEYS STUFF\KEYRAIL_DAEMON\BUILD\CMAKEFILES\AF17A97B2B149435A80CBEBE69483E5D\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe" "-SC:/Users/boris/Documents/hotkeys stuff/keyrail_daemon" "-BC:/Users/boris/Documents/hotkeys stuff/keyrail_daemon/build" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "C:/Users/boris/Documents/hotkeys stuff/keyrail_daemon/build/keyraild.sln"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
