@@ -47,9 +47,17 @@ fn app_dir() -> Result<PathBuf, String> {
     Ok(PathBuf::from(appdata).join("KeyRail"))
 }
 
+/// Large working data: the Vencord checkout and any downloaded build tools.
+///
+/// Deliberately NOT %LOCALAPPDATA%\KeyRail, which is where the installer puts
+/// the app itself. Uninstalling removes that directory recursively, and Vencord
+/// patches Discord with an absolute path into this folder — so sharing them
+/// means uninstalling KeyRail silently bricks Discord with "Cannot find module
+/// patcher.js" and no hint as to why. Keeping it separate also means the patch
+/// survives an uninstall instead of leaving Discord pointing at nothing.
 fn work_dir() -> Result<PathBuf, String> {
     let local = env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is not set")?;
-    Ok(PathBuf::from(local).join("KeyRail"))
+    Ok(PathBuf::from(local).join("KeyRailData"))
 }
 
 /// Runs a tool with `--version` to find out whether it is usable and which
@@ -453,6 +461,107 @@ fn integration_source(app: Option<&AppHandle>, relative: &[&str]) -> Result<Path
                 relative.join("/")
             )
         })
+}
+
+// ---- feedback ---------------------------------------------------------------
+
+/// Formspree endpoint. Not a credential: it only accepts submissions to this one
+/// form, so the worst an extracted copy allows is spam to the same inbox, which
+/// is fixed by rotating the form rather than by hiding the value.
+const FEEDBACK_ENDPOINT: &str = "https://formspree.io/f/mwvggkkj";
+
+/// Sends feedback from the user's machine.
+///
+/// Posted from Rust rather than the webview on purpose: a fetch() out of the
+/// webview is subject to CSP and CORS, and Formspree's browser SDKs assume a
+/// page origin that a Tauri app does not have. curl.exe ships with Windows, so
+/// this needs no new dependency, and the body goes through a temp file so a
+/// message containing quotes or newlines cannot break the command line.
+#[tauri::command]
+pub fn send_feedback(
+    category: String,
+    message: String,
+    email: String,
+    diagnostics: String,
+) -> Result<(), String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err("Write something first.".to_string());
+    }
+    if trimmed.chars().count() > 5000 {
+        return Err("That is longer than 5000 characters. Please trim it down.".to_string());
+    }
+
+    let mut body = serde_json::Map::new();
+    body.insert("category".into(), serde_json::Value::String(category));
+    body.insert("message".into(), serde_json::Value::String(trimmed.to_string()));
+    // Formspree uses `email` as the reply-to when present. Optional on purpose:
+    // nobody should have to identify themselves to report a bug.
+    if !email.trim().is_empty() {
+        body.insert("email".into(), serde_json::Value::String(email.trim().to_string()));
+    }
+    if !diagnostics.trim().is_empty() {
+        body.insert("diagnostics".into(), serde_json::Value::String(diagnostics));
+    }
+    body.insert(
+        "_subject".into(),
+        serde_json::Value::String("KeyRail feedback".to_string()),
+    );
+
+    let payload = serde_json::Value::Object(body).to_string();
+
+    let temp = env::temp_dir().join(format!("keyrail-feedback-{}.json", std::process::id()));
+    fs::write(&temp, payload).map_err(|error| format!("could not stage the message: {error}"))?;
+
+    let mut command = Command::new("curl.exe");
+    command.args([
+        "-s",
+        "-S",
+        "--fail-with-body",
+        "-X",
+        "POST",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        "Accept: application/json",
+        "--data-binary",
+        &format!("@{}", temp.display()),
+        FEEDBACK_ENDPOINT,
+    ]);
+    no_window(&mut command);
+
+    let output = command.output();
+    let _ = fs::remove_file(&temp);
+
+    let output = output.map_err(|error| format!("could not reach the network: {error}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    // Formspree returns its reason in the body, which is far more useful than
+    // curl's exit code.
+    let reason = serde_json::from_str::<serde_json::Value>(&stdout)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("errors")
+                .and_then(|errors| errors.as_array())
+                .and_then(|errors| errors.first())
+                .and_then(|first| first.get("message"))
+                .and_then(|message| message.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| {
+            if stdout.trim().is_empty() {
+                "no internet connection, or the service is unreachable".to_string()
+            } else {
+                stdout.trim().chars().take(200).collect()
+            }
+        });
+
+    Err(reason)
 }
 
 // ---- headless setup, driven by the installer --------------------------------

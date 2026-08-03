@@ -33,6 +33,12 @@ use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegCreateKeyExW, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
     HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_OPTION_NON_VOLATILE, REG_SZ,
 };
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{GetExitCodeProcess, WaitForSingleObject};
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::{ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW};
+#[cfg(windows)]
+use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
 const PIPE_NAME: &str = r"\\.\pipe\keyrail-control";
 const STARTUP_VALUE_NAME: &str = "KeyRailDaemon";
@@ -564,6 +570,55 @@ fn delete_startup_value() -> Result<(), String> {
     Ok(())
 }
 
+// Runs a program through the UAC elevation prompt and reports what it did.
+//
+// Registering a scheduled task with /RL HIGHEST is refused for a standard user
+// with a bare "Access is denied", which is what made enabling elevated startup
+// fail every time: the UI itself is never elevated, so schtasks.exe has to be.
+// `wait` is false for things the user paces themselves - waiting on a process
+// whose first act is to show a UAC prompt would block for as long as the prompt
+// sits unanswered.
+#[cfg(windows)]
+fn run_elevated(program: &str, parameters: &str, wait: bool) -> Result<Option<u32>, String> {
+    let verb: Vec<u16> = OsStr::new("runas").encode_wide().chain(Some(0)).collect();
+    let file: Vec<u16> = OsStr::new(program).encode_wide().chain(Some(0)).collect();
+    let params: Vec<u16> = OsStr::new(parameters).encode_wide().chain(Some(0)).collect();
+
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = std::mem::size_of::<SHELLEXECUTEINFOW>() as u32;
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.lpParameters = params.as_ptr();
+    info.nShow = SW_HIDE as i32;
+
+    let launched = unsafe { ShellExecuteExW(&mut info) };
+    if launched == 0 {
+        // Overwhelmingly this is the user clicking No on the UAC prompt.
+        return Err("the administrator prompt was cancelled".to_string());
+    }
+
+    if info.hProcess.is_null() {
+        return Ok(None);
+    }
+
+    if !wait {
+        unsafe { CloseHandle(info.hProcess) };
+        return Ok(None);
+    }
+
+    // 60s is for a human answering a prompt, not for the work itself.
+    unsafe { WaitForSingleObject(info.hProcess, 60_000) };
+    let mut code: u32 = 0;
+    let got_code = unsafe { GetExitCodeProcess(info.hProcess, &mut code) };
+    unsafe { CloseHandle(info.hProcess) };
+
+    if got_code == 0 {
+        return Ok(None);
+    }
+    Ok(Some(code))
+}
+
 #[cfg(windows)]
 fn elevated_task_exists() -> bool {
     Command::new("schtasks.exe")
@@ -576,41 +631,37 @@ fn elevated_task_exists() -> bool {
 
 #[cfg(windows)]
 fn set_elevated_startup_task(enabled: bool) -> Result<(), String> {
-    if enabled {
+    // Both halves go through UAC. Creating a HIGHEST task needs it outright, and
+    // deleting one created that way needs it too, so a standard-rights delete
+    // would silently leave the task behind and the checkbox would spring back on.
+    let parameters = if enabled {
         let daemon = startup_daemon_path()?;
         let task_run = quote_windows_path(&daemon);
-        let output = Command::new("schtasks.exe")
-            .args([
-                "/Create",
-                "/TN",
-                ELEVATED_TASK_NAME,
-                "/SC",
-                "ONLOGON",
-                "/TR",
-                &task_run,
-                "/RL",
-                "HIGHEST",
-                "/F",
-            ])
-            .creation_flags(0x08000000)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!("could not create elevated startup task: {stderr}{stdout}"));
-        }
+        format!(
+            "/Create /TN {ELEVATED_TASK_NAME} /SC ONLOGON /TR \"\\\"{}\\\"\" /RL HIGHEST /F",
+            task_run.trim_matches('"')
+        )
     } else {
-        let output = Command::new("schtasks.exe")
-            .args(["/Delete", "/TN", ELEVATED_TASK_NAME, "/F"])
-            .creation_flags(0x08000000)
-            .output()
-            .map_err(|error| error.to_string())?;
-        if !output.status.success() && elevated_task_exists() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            return Err(format!("could not remove elevated startup task: {stderr}{stdout}"));
-        }
+        format!("/Delete /TN {ELEVATED_TASK_NAME} /F")
+    };
+
+    let exit_code = run_elevated("schtasks.exe", &parameters, true)?;
+
+    // schtasks reports plenty of partial failures through its exit code, but the
+    // only thing that actually matters is whether the task is there afterwards,
+    // so that is what gets checked.
+    let exists = elevated_task_exists();
+    if enabled && !exists {
+        return Err(match exit_code {
+            Some(code) => format!("could not create the elevated startup task (schtasks exit code {code})"),
+            None => "could not create the elevated startup task".to_string(),
+        });
+    }
+    if !enabled && exists {
+        return Err(match exit_code {
+            Some(code) => format!("could not remove the elevated startup task (schtasks exit code {code})"),
+            None => "could not remove the elevated startup task".to_string(),
+        });
     }
     Ok(())
 }
@@ -677,17 +728,26 @@ fn set_daemon_startup(enabled: bool) -> Result<StartupStatus, String> {
     }
 }
 
+// Async for the same reason as restart_daemon_as_admin: this one waits on the
+// UAC prompt, so it must not sit on the thread that draws the window.
 #[tauri::command]
-fn set_daemon_elevated_startup(enabled: bool) -> Result<StartupStatus, String> {
+async fn set_daemon_elevated_startup(enabled: bool) -> Result<StartupStatus, String> {
     #[cfg(windows)]
     {
-        if enabled {
-            delete_startup_value()?;
-            set_elevated_startup_task(true)?;
-        } else {
-            set_elevated_startup_task(false)?;
-        }
-        daemon_startup_status()
+        tauri::async_runtime::spawn_blocking(move || {
+            if enabled {
+                // Removing the plain Run entry first would leave the user with no
+                // autostart at all if the elevation prompt is then declined, so
+                // the task is registered before the old entry goes.
+                set_elevated_startup_task(true)?;
+                delete_startup_value()?;
+            } else {
+                set_elevated_startup_task(false)?;
+            }
+            daemon_startup_status()
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     #[cfg(not(windows))]
@@ -697,8 +757,34 @@ fn set_daemon_elevated_startup(enabled: bool) -> Result<StartupStatus, String> {
     }
 }
 
+/// Every control-pipe call goes through here so none of them can hang forever.
+///
+/// The pipe I/O below is synchronous: if the daemon accepts a connection and
+/// then exits before replying — which is exactly what happens while it is being
+/// restarted — ReadFile blocks with no timeout. The Tauri command then never
+/// returns, its promise never settles, and the UI button it belongs to stays
+/// stuck on its busy label forever. Running the call on a worker thread and
+/// giving up after a few seconds turns that into an ordinary error. The blocked
+/// thread is abandoned; it unblocks by itself when the pipe closes.
 #[cfg(windows)]
 fn send_pipe_raw(command: &str) -> Result<String, String> {
+    use std::sync::mpsc;
+
+    let owned = command.to_string();
+    let (sender, receiver) = mpsc::channel();
+
+    thread::spawn(move || {
+        let _ = sender.send(send_pipe_blocking(&owned));
+    });
+
+    match receiver.recv_timeout(Duration::from_secs(5)) {
+        Ok(result) => result,
+        Err(_) => Err("the daemon did not answer in time".to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn send_pipe_blocking(command: &str) -> Result<String, String> {
     let request = json!({ "command": command }).to_string();
     let mut pipe_name: Vec<u16> = PIPE_NAME.encode_utf16().collect();
     pipe_name.push(0);
@@ -772,20 +858,6 @@ fn wait_for_daemon_pipe_down(timeout: Duration) -> bool {
         thread::sleep(Duration::from_millis(100));
     }
     send_pipe_raw("status").is_err()
-}
-
-#[cfg(windows)]
-fn wait_for_daemon_pipe_status(timeout: Duration, needle: &str) -> bool {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        if let Ok(status) = send_pipe_raw("status") {
-            if status.to_ascii_lowercase().contains(needle) {
-                return true;
-            }
-        }
-        thread::sleep(Duration::from_millis(150));
-    }
-    false
 }
 
 #[cfg(not(windows))]
@@ -896,34 +968,38 @@ fn ensure_daemon() -> Result<(), String> {
     Err("daemon started but did not open the control pipe".to_string())
 }
 
+// Returns as soon as the elevated daemon has been asked for, without waiting for
+// it to come up. It used to block until it saw "daemon elevated: yes", up to 8s
+// of polling on top of up to 6s spent watching the old daemon go down - and every
+// one of those polls talks to a pipe that is deliberately absent, so each costs
+// its full timeout. All of that happened while the user was still looking at the
+// UAC prompt, which they can take any amount of time to answer. The button sat on
+// "Restarting..." for the whole stretch and looked hung, because it was. The
+// frontend polls for the result instead, which is what it already does for every
+// other daemon state change.
 #[tauri::command]
-fn restart_daemon_as_admin() -> Result<(), String> {
+async fn restart_daemon_as_admin() -> Result<(), String> {
     #[cfg(windows)]
     {
-        let daemon = startup_daemon_path()?;
+        tauri::async_runtime::spawn_blocking(|| {
+            let daemon = startup_daemon_path()?;
 
-        if send_pipe_raw("status").is_ok() {
-            let _ = send_pipe_raw("quit");
-            if !wait_for_daemon_pipe_down(Duration::from_secs(6)) {
-                return Err(
-                    "the existing daemon did not stop, so administrator restart was cancelled"
-                        .to_string(),
-                );
+            if send_pipe_raw("status").is_ok() {
+                let _ = send_pipe_raw("quit");
+                if !wait_for_daemon_pipe_down(Duration::from_secs(4)) {
+                    return Err(
+                        "the existing daemon did not stop, so administrator restart was cancelled"
+                            .to_string(),
+                    );
+                }
             }
-        }
 
-        let script = format!(
-            "Start-Process -FilePath '{}' -Verb RunAs -WindowStyle Hidden",
-            daemon.display().to_string().replace('\'', "''")
-        );
-        Command::new("powershell.exe")
-            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &script])
-            .creation_flags(0x08000000)
-            .spawn()
-            .map_err(|error| error.to_string())?;
-
-        let _ = wait_for_daemon_pipe_status(Duration::from_secs(8), "daemon elevated: yes");
-        Ok(())
+            // Launched, not awaited: the prompt belongs to the user.
+            run_elevated(&daemon.display().to_string(), "", false)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| error.to_string())?
     }
 
     #[cfg(not(windows))]
@@ -1006,6 +1082,8 @@ fn main() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
@@ -1026,6 +1104,7 @@ fn main() {
             open_browser_extensions_page,
             setup::detect_setup,
             setup::take_pending_setup,
+            setup::send_feedback,
             setup::stage_browser_extension,
             setup::open_browser,
             setup::reveal_path,

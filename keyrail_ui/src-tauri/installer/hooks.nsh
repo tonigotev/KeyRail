@@ -23,6 +23,19 @@
   nsExec::ExecToLog 'taskkill /F /IM keyraild.exe'
   Pop $0
   Sleep 300
+
+  ; Clean up the app's previous identity. Before the rename it ran as
+  ; hotkeyd.exe under its own autostart entry and its own single-instance
+  ; mutex, so nothing stops the two builds running side by side: the old one
+  ; keeps the browser bridge port and the new one silently reports no
+  ; extension connected. The old uninstaller cannot do this because upgraders
+  ; never run it.
+  DetailPrint "Removing the previous version's autostart entry..."
+  nsExec::ExecToLog 'taskkill /F /IM hotkeyd.exe'
+  Pop $0
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "HotkeyToCommandDaemon"
+  nsExec::ExecToLog 'schtasks /Delete /TN "HotkeyToCommandDaemonElevated" /F'
+  Pop $0
 !macroend
 
 !macro NSIS_HOOK_POSTINSTALL

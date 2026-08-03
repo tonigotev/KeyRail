@@ -8,9 +8,9 @@ Thumbs.db
 .claude/
 
 # C++ / CMake build output
-hotkey_to_command_cpp/build/
-hotkey_to_command_cpp/out/
-hotkey_to_command_cpp/.vs/
+keyrail_daemon/build/
+keyrail_daemon/out/
+keyrail_daemon/.vs/
 *.obj
 *.pdb
 *.ilk
@@ -20,18 +20,21 @@ hotkey_to_command_cpp/.vs/
 *.exp
 
 # Node / Vite / Svelte output
-hotkey_to_command_ui/node_modules/
-hotkey_to_command_ui/dist/
-hotkey_to_command_ui/.svelte-kit/
-hotkey_to_command_ui/.vite/
+keyrail_ui/node_modules/
+keyrail_ui/dist/
+keyrail_ui/.svelte-kit/
+keyrail_ui/.vite/
 
 # Rust / Tauri output
-hotkey_to_command_ui/src-tauri/target/
-hotkey_to_command_ui/src-tauri/gen/
+keyrail_ui/src-tauri/target/
+keyrail_ui/src-tauri/gen/
 
-# build.ps1 output
+# build.ps1 output. dist/ is always just the newest build, so nothing in it is
+# worth committing. releases/ keeps the installers for published versions, and
+# those belong on a GitHub release page rather than in git history.
 dist/
-hotkey_to_command_ui/src-tauri/binaries/
+releases/
+keyrail_ui/src-tauri/binaries/
 
 # Local runtime config
 config.json

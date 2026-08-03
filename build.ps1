@@ -20,6 +20,16 @@
 .PARAMETER Configuration
     CMake configuration to build. Release by default.
 
+.PARAMETER Release
+    Also archive the installers into releases\v<version>\. Only pass this when you
+    are actually publishing a version, so releases\ stays a short list of real
+    releases instead of a pile of every build.
+
+.OUTPUTS
+    dist\ always holds exactly one build: the current one. A full build clears it
+    first, so there is never an older exe sitting next to a newer one. Old versions
+    live in releases\ and nowhere else.
+
 .EXAMPLE
     .\build.ps1
     Rebuild the daemon and restart it.
@@ -27,12 +37,17 @@
 .EXAMPLE
     .\build.ps1 -All
     Rebuild the daemon plus the UI and installers.
+
+.EXAMPLE
+    .\build.ps1 -All -Release
+    Full build, and keep a copy of the installers under releases\v0.1.0\.
 #>
 
 [CmdletBinding()]
 param(
     [switch]$All,
     [switch]$NoRestart,
+    [switch]$Release,
     [ValidateSet("Release", "Debug")]
     [string]$Configuration = "Release"
 )
@@ -44,6 +59,11 @@ $cppDir = Join-Path $root "keyrail_daemon"
 $cppBuildDir = Join-Path $cppDir "build"
 $uiDir = Join-Path $root "keyrail_ui"
 $distDir = Join-Path $root "dist"
+$releasesDir = Join-Path $root "releases"
+
+# The installer file names carry this, and releases\ is keyed on it, so read it
+# from the one place that actually defines it rather than hardcoding a copy.
+$version = (Get-Content (Join-Path $uiDir "src-tauri\tauri.conf.json") -Raw | ConvertFrom-Json).version
 
 # Windows PowerShell turns any stderr output from a native exe into a terminating
 # error while ErrorActionPreference is Stop. cmake, npm and tauri all write
@@ -164,6 +184,14 @@ if (-not (Test-Path (Join-Path $cppBuildDir "CMakeCache.txt"))) {
 
 Invoke-Native -What "daemon build" -Action { & $cmake --build $cppBuildDir --config $Configuration }
 
+# A full build produces every artifact, so dist\ is emptied first and refilled.
+# That is the whole point: "which exe is the latest" should never be a question
+# you have to answer by comparing timestamps. A daemon-only build cannot refill
+# the installer, so it leaves the rest of dist\ alone and warns about it below.
+if ($All -and (Test-Path $distDir)) {
+    Remove-Item (Join-Path $distDir "*") -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Note "cleared dist\ so it holds only this build"
+}
 if (-not (Test-Path $distDir)) { New-Item -ItemType Directory -Path $distDir | Out-Null }
 
 $daemonExe = Join-Path $cppBuildDir "$Configuration\keyraild.exe"
@@ -195,6 +223,27 @@ if ($All) {
     }
     Write-Note "staged the daemon for bundling"
 
+    # The updater only installs a bundle it can verify against the public key in
+    # tauri.conf.json, so the build has to be signed with the matching private
+    # key. Without it the build still succeeds and still installs by hand - it
+    # just produces no .sig, and every existing install rejects the update.
+    # The key is deliberately password protected. Windows cannot hold an empty
+    # environment variable - assigning "" deletes it - so a password-less key
+    # leaves TAURI_SIGNING_PRIVATE_KEY_PASSWORD unset, and the bundler then stops
+    # to prompt for it and hangs any unattended build. A real password is the
+    # only value that survives being passed through the environment here.
+    $signingKey = Join-Path $env:USERPROFILE ".tauri\keyrail.key"
+    $signingPass = Join-Path $env:USERPROFILE ".tauri\keyrail.pass"
+    if ((Test-Path $signingKey) -and (Test-Path $signingPass)) {
+        $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content $signingKey -Raw
+        $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = (Get-Content $signingPass -Raw).Trim()
+        Write-Note "signing updater artifacts with $signingKey"
+    } elseif (Test-Path $signingKey) {
+        Write-Warning "found $signingKey but no $signingPass - the build would stop to prompt for the password"
+    } else {
+        Write-Warning "no signing key at $signingKey - this build cannot be published as an update"
+    }
+
     Push-Location $uiDir
     try {
         if (-not (Test-Path (Join-Path $uiDir "node_modules"))) {
@@ -212,36 +261,126 @@ if ($All) {
     $uiExe = Join-Path $uiRelease "keyrail_ui.exe"
     $copied = Copy-ToDist $uiExe
     if ($copied) { $built += $copied }
-    if ($uiWasRunning) {
-        Write-Note "reopening the settings UI"
-        Start-Process -FilePath $uiExe
-    }
 
     # The UI looks for keyraild.exe next to itself first, so dist\ works as a
     # self-contained folder you can copy anywhere.
     foreach ($installer in @("bundle\nsis", "bundle\msi")) {
         $dir = Join-Path $uiRelease $installer
         if (-not (Test-Path $dir)) { continue }
-        $installers = Get-ChildItem $dir -File -Recurse | Where-Object { $_.Extension -in ".exe", ".msi" }
+        $installers = Get-ChildItem $dir -File -Recurse | Where-Object { $_.Extension -in ".exe", ".msi", ".sig" }
         foreach ($file in $installers) {
             $copied = Copy-ToDist $file.FullName
             if ($copied) { $built += $copied }
         }
+    }
+
+    # Says what dist\ actually is, so the answer to "which build is this" lives
+    # next to the files instead of in a chat log.
+    $commit = "unknown"
+    try {
+        $ErrorActionPreference = "Continue"
+        $commit = (& git -C $root rev-parse --short HEAD 2>$null)
+        $ErrorActionPreference = "Stop"
+    } catch { }
+    @(
+        "KeyRail $version"
+        "built $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        "commit $commit"
+        ""
+        "Install with KeyRail_${version}_x64-setup.exe."
+        "This folder is wiped and refilled by build.ps1 -All, so it is always the"
+        "newest build. Older versions are kept under releases\ only."
+    ) -join "`r`n" | Set-Content (Join-Path $distDir "BUILD.txt") -Encoding ascii
+
+    if ($Release) {
+        Write-Step "Archiving release v$version"
+        $target = Join-Path $releasesDir "v$version"
+        if (Test-Path $target) {
+            Write-Warning "releases\v$version already exists and will be overwritten. Bump the version in tauri.conf.json before publishing a different build."
+        }
+        New-Item -ItemType Directory -Force $target | Out-Null
+        $setupName = "KeyRail_${version}_x64-setup.exe"
+        foreach ($name in @($setupName, "$setupName.sig", "KeyRail_${version}_x64_en-US.msi", "BUILD.txt")) {
+            $source = Join-Path $distDir $name
+            if (Test-Path $source) { Copy-Item $source -Destination $target -Force }
+        }
+
+        # latest.json is what the app actually reads. Writing it here keeps the
+        # signature, version and download URL in step with the exe they describe,
+        # which hand-editing reliably gets wrong.
+        $sigPath = Join-Path $distDir "$setupName.sig"
+        if (Test-Path $sigPath) {
+            $manifest = [ordered]@{
+                version   = $version
+                notes     = "See the release notes on GitHub."
+                pub_date  = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                platforms = [ordered]@{
+                    "windows-x86_64" = [ordered]@{
+                        signature = (Get-Content $sigPath -Raw).Trim()
+                        url       = "https://github.com/tonigotev/KeyRail/releases/download/v$version/$setupName"
+                    }
+                }
+            }
+            $manifest | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $target "latest.json") -Encoding ascii
+            Write-Note "wrote latest.json"
+        } else {
+            Write-Warning "no .sig produced, so latest.json was skipped. Updates will not work for this build."
+        }
+
+        Write-Note "archived to releases\v$version"
+        Write-Host ""
+        Write-Note "to publish: create a GitHub release tagged v$version and upload"
+        Write-Note "  $setupName  and  latest.json  from releases\v$version"
+    }
+}
+
+# --- refresh the installed copy ----------------------------------------------
+
+# Running a build tree copy alongside an installed copy is how you end up with
+# two daemons fighting over the browser bridge port, two WebView2 profiles, and
+# a UI that reports state belonging to the other one. If KeyRail is installed,
+# the freshly built installer is applied over it so there is exactly one app on
+# the machine and it is always the current build.
+$installedDir = Join-Path $env:LOCALAPPDATA "KeyRail"
+$installedUi = Join-Path $installedDir "keyrail_ui.exe"
+
+if ($All -and (Test-Path $installedUi)) {
+    Write-Step "Updating the installed copy"
+    $setup = Get-ChildItem $distDir -Filter "KeyRail_*_x64-setup.exe" -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($setup) {
+        Invoke-Native -What "installer" -Action { & $setup.FullName /S | Out-Null }
+        Start-Sleep -Seconds 2
+        Write-Note "installed app updated from $($setup.Name)"
+    } else {
+        Write-Warning "no installer found in dist; the installed copy is now older than this build"
     }
 }
 
 # --- restart ----------------------------------------------------------------
 
 if ($wasRunning -and -not $NoRestart) {
-    Write-Step "Restarting the daemon"
-    Start-Process -FilePath $daemonExe
+    Write-Step "Restarting"
+    # Prefer the installed daemon so the running process matches the installed
+    # app rather than the build tree.
+    $daemonToRun = if (Test-Path (Join-Path $installedDir "keyraild.exe")) {
+        Join-Path $installedDir "keyraild.exe"
+    } else {
+        $daemonExe
+    }
+    Start-Process -FilePath $daemonToRun
     Start-Sleep -Milliseconds 800
     if (Get-Process keyraild -ErrorAction SilentlyContinue) {
         Write-Note "keyraild is running again"
     } else {
         Write-Warning "keyraild did not stay running. Start it from the UI to see why."
     }
-} elseif ($wasRunning) {
+}
+
+if ($All -and $uiWasRunning -and (Test-Path $installedUi)) {
+    Write-Note "reopening the installed settings UI"
+    Start-Process -FilePath $installedUi
+} elseif ($wasRunning -and $NoRestart) {
     Write-Note "daemon left stopped (-NoRestart)"
 }
 
@@ -249,7 +388,16 @@ Write-Step "Done"
 foreach ($path in $built) {
     Write-Host "    $path" -ForegroundColor Green
 }
+
 if (-not $All) {
+    # dist\ was not cleared, so any installer in it predates the daemon just
+    # built. Saying so beats letting someone ship it by mistake.
+    $staleInstaller = Get-ChildItem $distDir -Filter "KeyRail_*-setup.exe" -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -lt (Get-Item $daemonExe).LastWriteTime }
+    if ($staleInstaller) {
+        Write-Host ""
+        Write-Warning "dist\$($staleInstaller[0].Name) is older than this daemon build. Run .\build.ps1 -All to refresh it."
+    }
     Write-Host ""
     Write-Note "run .\build.ps1 -All to also build the settings UI and installers"
 }

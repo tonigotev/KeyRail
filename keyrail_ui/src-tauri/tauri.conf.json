@@ -21,9 +21,21 @@
       }
     ]
   },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/tonigotev/KeyRail/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlCMEFEOUE5OUFGMkZEQTkKUldTcC9mS2FxZGtLbTA5Nkk3TFlBRzNNYnkvQU9VSUlpVUV0UFJaQm9NR1FkK05tSG9qSFNHVmwK",
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  },
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/icon.ico",
       "icons/icon-16.png",

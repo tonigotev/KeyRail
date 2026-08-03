@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   font-family: Inter, Segoe UI, system-ui, sans-serif;
   color: #182026;
   background: #e8e6e1;
@@ -19,7 +19,8 @@ body {
 
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 
@@ -266,7 +267,6 @@ main {
   padding: 24px 18px 20px;
   background: #13222d;
   color: #e7f4f5;
-  scrollbar-width: thin;
 }
 
 .daemon-panel,
@@ -587,6 +587,52 @@ main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(72px, 0.86fr);
   gap: 7px;
+}
+
+/* Shares the preset box's shell so Settings keeps one visual language. */
+.update-box {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(169, 222, 220, 0.18);
+  border-radius: 8px;
+  background: rgba(5, 18, 26, 0.24);
+}
+
+.update-actions {
+  display: grid;
+  gap: 7px;
+}
+
+.update-box button {
+  min-width: 0;
+  width: 100%;
+  padding-inline: 8px;
+  border-color: rgba(169, 222, 220, 0.28);
+  background: rgba(255, 255, 255, 0.06);
+  color: #dffbfb;
+  font-size: 13px;
+  white-space: nowrap;
+}
+
+.update-message,
+.update-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.update-message {
+  color: #b9eeee;
+}
+
+.update-message.error {
+  color: #ff9a9a;
+}
+
+.update-note {
+  color: #8aa2ae;
 }
 
 .advanced {
@@ -1548,18 +1594,6 @@ article.highlight {
   line-height: 1.4;
 }
 
-.bridge-card.connected {
-  border-color: rgba(32, 181, 143, 0.42);
-}
-
-.bridge-card.checking {
-  border-color: rgba(101, 163, 255, 0.52);
-}
-
-.bridge-card.pulse {
-  animation: bridge-pulse 820ms ease both;
-}
-
 .bridge-status {
   display: flex;
   align-items: flex-start;
@@ -1568,26 +1602,6 @@ article.highlight {
   border-radius: 8px;
   background: #f5f7f9;
   padding: 13px;
-}
-
-.bridge-card.checking .bridge-status {
-  position: relative;
-  overflow: hidden;
-}
-
-.bridge-card.checking .bridge-status::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    rgba(101, 163, 255, 0.14),
-    transparent
-  );
-  transform: translateX(-100%);
-  animation: bridge-scan 950ms ease-in-out infinite;
-  pointer-events: none;
 }
 
 .bridge-status strong {
@@ -1616,12 +1630,6 @@ article.highlight {
 .bridge-dot.online {
   background: #20b58f;
   box-shadow: 0 0 0 4px rgba(32, 181, 143, 0.17);
-}
-
-.bridge-card.checking .bridge-dot {
-  background: #65a3ff;
-  box-shadow: 0 0 0 4px rgba(101, 163, 255, 0.16);
-  animation: bridge-dot-check 720ms ease-in-out infinite;
 }
 
 .setup-steps {
@@ -1808,10 +1816,27 @@ select {
   padding: 0 10px;
 }
 
+/* Same skin as the single-line fields, minus their fixed height. Kept as its
+   own rule because a textarea grows, so it must never inherit height: 32px. */
+textarea {
+  width: 100%;
+  border: 1px solid #d7dde3;
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: #182026;
+  padding: 8px 10px;
+}
+
 input:focus,
-select:focus {
+select:focus,
+textarea:focus {
   outline: 2px solid rgba(15, 143, 142, 0.24);
   border-color: #0f8f8e;
+}
+
+::placeholder {
+  color: #98a3ad;
+  opacity: 1;
 }
 
 select.advanced-pulse {
@@ -2350,6 +2375,25 @@ main[data-theme] .preset-box button {
   color: var(--sidebar-text);
 }
 
+main[data-theme] .update-box {
+  border-color: color-mix(in srgb, var(--accent) 20%, var(--sidebar-panel));
+  background: color-mix(in srgb, var(--sidebar-panel-strong) 72%, transparent);
+}
+
+main[data-theme] .update-box button {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--sidebar-panel));
+  background: color-mix(in srgb, var(--sidebar-panel) 72%, transparent);
+  color: var(--sidebar-text);
+}
+
+main[data-theme] .update-message {
+  color: var(--sidebar-text);
+}
+
+main[data-theme] .update-note {
+  color: var(--sidebar-muted-2);
+}
+
 main[data-theme] .log-box {
   background: var(--sidebar-panel-strong);
   color: color-mix(in srgb, var(--accent) 55%, white);
@@ -2494,7 +2538,8 @@ main[data-theme] .action-details {
 }
 
 main[data-theme] input,
-main[data-theme] select {
+main[data-theme] select,
+main[data-theme] textarea {
   border-color: var(--line);
   background: var(--surface-strong);
   color: var(--text);
@@ -2505,8 +2550,14 @@ main[data-theme] select {
     transform 150ms ease;
 }
 
+main[data-theme] ::placeholder {
+  color: var(--muted);
+  opacity: 1;
+}
+
 main[data-theme] input:focus,
-main[data-theme] select:focus {
+main[data-theme] select:focus,
+main[data-theme] textarea:focus {
   outline-color: var(--focus-ring);
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--focus-ring);
@@ -2592,51 +2643,16 @@ main[data-theme] button.danger {
   box-shadow: none;
 }
 
-main[data-theme] button.stop {
-  background: color-mix(in srgb, var(--danger) 24%, var(--sidebar-panel));
-  border-color: color-mix(in srgb, var(--danger-line) 58%, var(--sidebar-panel));
-  color: color-mix(in srgb, var(--danger-soft) 82%, white);
-}
-
+/* Stop and the preset Delete deliberately share the destructive styling used on
+   the bindings page. They used to blend --danger into --sidebar-panel, which on
+   the dark theme produced a muddy maroon that read as neither red nor disabled.
+   One recipe for destructive buttons, wherever they sit. */
 main[data-theme] button.stop:hover,
 main[data-theme] button.danger:hover {
   background: color-mix(in srgb, var(--danger) 15%, var(--surface));
   border-color: color-mix(in srgb, var(--danger-line) 82%, var(--danger));
   color: var(--danger-strong);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--danger) 8%, transparent);
-}
-
-main[data-theme] button.stop:hover {
-  background: color-mix(in srgb, var(--danger) 34%, var(--sidebar-panel));
-  color: #ffffff;
-}
-
-main[data-theme] .preset-box button.danger {
-  border-color: color-mix(in srgb, var(--danger-line) 52%, var(--sidebar-panel));
-  background: color-mix(in srgb, var(--danger) 32%, var(--sidebar-panel));
-  color: color-mix(in srgb, var(--danger-soft) 84%, white);
-}
-
-main[data-theme] .preset-box button.danger:hover {
-  border-color: color-mix(in srgb, var(--danger-line) 72%, var(--danger));
-  background: color-mix(in srgb, var(--danger) 44%, var(--sidebar-panel));
-  color: #ffffff;
-}
-
-main[data-theme="dark"] button.stop:disabled,
-main[data-theme="dark"] button.danger:disabled {
-  opacity: 0.82;
-  color: #ffdce2;
-}
-
-main[data-theme="dark"] button.stop:disabled {
-  background: color-mix(in srgb, var(--danger) 28%, var(--sidebar-panel));
-  border-color: color-mix(in srgb, var(--danger-line) 72%, var(--sidebar-panel));
-}
-
-main[data-theme="dark"] .preset-box button.danger:disabled {
-  background: color-mix(in srgb, var(--danger) 36%, var(--sidebar-panel));
-  border-color: color-mix(in srgb, var(--danger-line) 72%, var(--sidebar-panel));
 }
 
 main[data-theme] .window-controls button {
@@ -2940,23 +2956,6 @@ main[data-theme] .settings-note {
   border-color: var(--line);
   background: var(--surface-soft);
   color: var(--muted);
-}
-
-main[data-theme] .bridge-card.connected {
-  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
-}
-
-main[data-theme] .bridge-card.checking {
-  border-color: color-mix(in srgb, var(--accent) 56%, var(--line));
-}
-
-main[data-theme] .bridge-card.checking .bridge-status::after {
-  background: linear-gradient(
-    90deg,
-    transparent,
-    color-mix(in srgb, var(--accent) 16%, transparent),
-    transparent
-  );
 }
 
 main[data-theme] .bridge-status {
@@ -4052,6 +4051,230 @@ main[data-theme] .setup-notice {
   border: none;
   transform: none;
   box-shadow: none;
+}
+
+/* ---- Wide-window layout ----------------------------------------------------
+   Maximised, the window can be 1700px+. Left unconstrained, a form field
+   stretches to the full width while its label sits alone at the far left, and
+   body text runs to line lengths nobody can track back to the next line.
+   These caps keep a readable measure and stop panels from becoming mostly empty
+   space.
+
+   The bindings page is deliberately excluded: its rows genuinely use the width,
+   which is why its toolbar does not carry .page-toolbar. */
+
+/* Capped and centred. Capping alone strands everything in the top-left corner
+   of a maximised window, which reads as broken rather than deliberate, so every
+   capped block is also centred with margin-inline.
+
+   Settings deliberately stays a single column. Two columns were tried and look
+   worse: the cards vary a lot in height, so a grid leaves ragged holes beside
+   the short ones. */
+.page-toolbar,
+.wiz-rail,
+.wiz-panel,
+.guide-list,
+.settings-toolbar,
+.settings-grid {
+  width: 100%;
+  margin-inline: auto;
+}
+
+.page-toolbar,
+.wiz-rail,
+.wiz-panel,
+.guide-list {
+  max-width: 980px;
+}
+
+.settings-toolbar,
+.settings-grid {
+  max-width: 980px;
+}
+
+/* Forms read worse wide than prose does, so the feedback panel is tighter. */
+.feedback-panel {
+  max-width: 760px;
+}
+
+/* ---- Scrollbars -----------------------------------------------------------
+   The default Windows scrollbar is a wide light-grey slab that looks pasted on
+   over any of the themes, and worst of all on the dark ones. These rules give
+   every scrolling area the same slim overlay-style bar.
+
+   The thumb uses a transparent border with background-clip so it reads as
+   inset, and the track stays transparent so it picks up whatever surface it
+   sits on rather than needing a per-theme colour of its own. */
+
+/* Deliberately NOT using scrollbar-width / scrollbar-color. When either
+   standard property is set, Chromium switches to its own scrollbar renderer and
+   ignores every ::-webkit-scrollbar rule below — including the one that hides
+   the stepper arrows, which the standard renderer always draws. The two APIs
+   cannot be mixed, so this file commits to the webkit one. */
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* The stepper arrows are the most dated part of the default bar and serve no
+   purpose next to a wheel or a trackpad. */
+::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-color: rgba(125, 135, 146, 0.45);
+  background-clip: content-box;
+  transition: background-color 140ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(125, 135, 146, 0.72);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: rgba(125, 135, 146, 0.9);
+}
+
+/* The sidebar is dark in every theme, so it needs a lighter thumb than the
+   content area beside it. */
+.sidebar {
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+  background-color: rgba(231, 244, 245, 0.28);
+}
+
+.sidebar::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(231, 244, 245, 0.5);
+}
+
+main[data-theme] {
+}
+
+main[data-theme] ::-webkit-scrollbar-thumb {
+  background-color: color-mix(in srgb, var(--muted) 55%, transparent);
+}
+
+main[data-theme] ::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--muted) 85%, transparent);
+}
+
+main[data-theme] ::-webkit-scrollbar-thumb:active {
+  background-color: var(--muted);
+}
+
+/* ---- Feedback page -------------------------------------------------------- */
+
+
+.feedback-form {
+  display: grid;
+  gap: 14px;
+  /* The measure is set by .feedback-panel, so the fields fill it rather than
+     stopping short and leaving a gap down the right of the card. */
+}
+
+.feedback-field {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+  color: #53616e;
+}
+
+.feedback-field textarea {
+  resize: vertical;
+  min-height: 130px;
+  line-height: 1.5;
+  padding: 10px 12px;
+}
+
+.feedback-field small {
+  justify-self: end;
+  color: #8a95a1;
+  font-size: 11px;
+}
+
+.feedback-field small.over {
+  color: var(--danger, #d63b45);
+  font-weight: 600;
+}
+
+.feedback-diagnostics {
+  border: 1px solid #e4e8ec;
+  border-radius: 6px;
+  background: #fafbfc;
+  padding: 7px 10px;
+  overflow-wrap: anywhere;
+  color: #6b7785;
+  font-family: "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.feedback-result {
+  border: 1px solid #f1c98e;
+  border-left: 3px solid var(--warning, #f59f3a);
+  border-radius: 7px;
+  background: #fff8ed;
+  padding: 9px 12px;
+  color: #b75c0c;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.feedback-result.ok {
+  border-color: color-mix(in srgb, #20b58f 42%, #e4e8ec);
+  border-left-color: #20b58f;
+  background: color-mix(in srgb, #20b58f 10%, #ffffff);
+  color: #147a62;
+}
+
+.feedback-note {
+  margin: 0;
+  max-width: 68ch;
+  color: #8a95a1;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+main[data-theme] .feedback-field,
+main[data-theme] .feedback-field small,
+main[data-theme] .feedback-note {
+  color: var(--muted);
+}
+
+main[data-theme] .feedback-field small.over {
+  color: var(--danger);
+}
+
+main[data-theme] .feedback-diagnostics {
+  border-color: var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+}
+
+main[data-theme] .feedback-result {
+  border-color: color-mix(in srgb, var(--warning) 45%, var(--line));
+  border-left-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+  color: var(--warning);
+}
+
+main[data-theme] .feedback-result.ok {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--line));
+  border-left-color: var(--success);
+  background: color-mix(in srgb, var(--success) 10%, var(--surface));
+  color: var(--success);
 }
 
 /* ---- Guides page --------------------------------------------------------- */

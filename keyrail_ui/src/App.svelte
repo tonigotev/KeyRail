@@ -3,6 +3,9 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getVersion } from "@tauri-apps/api/app";
+  import { check, type Update } from "@tauri-apps/plugin-updater";
+  import { relaunch } from "@tauri-apps/plugin-process";
   import appIconUrl from "./assets/keyrail-icon.svg";
   import { guides } from "./guides";
 
@@ -146,7 +149,7 @@
   let advancedPulseTimer: ReturnType<typeof setTimeout> | undefined;
   let theme: ThemeName = "current";
   let searchQuery = "";
-  let activePage: "bindings" | "settings" | "setup" | "guides" = "bindings";
+  let activePage: "bindings" | "settings" | "setup" | "guides" | "feedback" = "bindings";
   let onboardingOpen = false;
   let onboardingStep = 0;
   let onboardingAnimationKey = 0;
@@ -156,7 +159,6 @@
   let onboardingCreatedBindingIds: string[] = [];
   let onboardingTestStartEvent = "";
   let onboardingTestState: "idle" | "listening" | "success" | "timeout" | "skipped" = "idle";
-  let onboardingDiscordOptIn = false;
   let addChooserOpen = false;
   let addQuery = "";
   let addSelectedIndex = 0;
@@ -170,9 +172,7 @@
   let pendingDelete: DeleteTarget | null = null;
   let mediaPickerIntroOpen = false;
   let daemonStatusCheckingVisual = false;
-  let browserBridgePulse = false;
   let browserBridgeCheckingVisual = false;
-  let browserBridgePulseTimer: ReturnType<typeof setTimeout> | undefined;
   let browserBridge: BrowserBridgeStatus = {
     connected: false,
     clients: 0,
@@ -216,10 +216,77 @@
   $: filteredAddItems = addItems.filter((item) => addItemMatches(item, addQuery));
   $: if (addSelectedIndex >= filteredAddItems.length) addSelectedIndex = Math.max(0, filteredAddItems.length - 1);
 
+  // --- updates ---------------------------------------------------------------
+  //
+  // check() fetches the release feed named in tauri.conf.json and verifies the
+  // download against the public key compiled into the app, so a hijacked URL
+  // still cannot install anything. Installing runs the NSIS setup, whose
+  // PREINSTALL hook stops the daemon first - without that the update would fail
+  // on keyraild.exe being locked by the running process.
+  let updateAvailable: Update | null = null;
+  let updateState: "idle" | "checking" | "downloading" | "ready" | "none" | "error" = "idle";
+  let updateMessage = "";
+  let appVersion = "";
+
+  async function checkForUpdates(manual: boolean) {
+    if (updateState === "checking" || updateState === "downloading") return;
+    updateState = "checking";
+    updateMessage = "";
+    try {
+      const found = await check();
+      if (found) {
+        updateAvailable = found;
+        updateState = "ready";
+        updateMessage = `Version ${found.version} is available.`;
+        if (!manual) logEvent(`update available: ${found.version}`, "ok");
+      } else {
+        updateAvailable = null;
+        updateState = "none";
+        updateMessage = "You are on the latest version.";
+        if (manual) logEvent("no update available");
+      }
+    } catch (error) {
+      updateState = "error";
+      updateMessage = String(error);
+      // A silent check must never nag. Someone offline, behind a proxy, or
+      // running a build that predates the first release should see nothing.
+      if (manual) logEvent("update check failed", "error", String(error));
+    }
+  }
+
+  async function installUpdate() {
+    if (!updateAvailable) return;
+    updateState = "downloading";
+    updateMessage = "Downloading...";
+    try {
+      let total = 0;
+      let received = 0;
+      await updateAvailable.downloadAndInstall((progress) => {
+        if (progress.event === "Started") {
+          total = progress.data.contentLength ?? 0;
+        } else if (progress.event === "Progress") {
+          received += progress.data.chunkLength;
+          updateMessage = total
+            ? `Downloading... ${Math.round((received / total) * 100)}%`
+            : "Downloading...";
+        } else if (progress.event === "Finished") {
+          updateMessage = "Installing...";
+        }
+      });
+      updateMessage = "Restarting...";
+      await relaunch();
+    } catch (error) {
+      updateState = "error";
+      updateMessage = String(error);
+      logEvent("update install failed", "error", String(error));
+    }
+  }
+
   onMount(() => {
     const savedTheme = localStorage.getItem("hotkey-ui-theme") as ThemeName | null;
     if (savedTheme && themes.some((item) => item.name === savedTheme)) theme = savedTheme;
     simpleLog = localStorage.getItem("hotkey-log-mode") !== "detailed";
+    void getVersion().then((version) => (appVersion = version)).catch(() => undefined);
     void (async () => {
       await loadConfig().catch(() => undefined);
       await refreshPresets();
@@ -242,6 +309,11 @@
       } catch {
         // Not fatal: the app is perfectly usable without the handoff.
       }
+
+      // Last, and never awaited by anything above it: a slow or unreachable
+      // release feed must not hold up the bindings list. Failures stay silent
+      // here and only surface when the user asks in Settings.
+      void checkForUpdates(false);
     })();
     statusTimer = setInterval(() => {
       void refreshStatusQuietly();
@@ -276,9 +348,117 @@
     logEvent(`theme set to ${name}`);
   }
 
-  function setPage(page: "bindings" | "settings" | "setup" | "guides") {
+  function setPage(page: "bindings" | "settings" | "setup" | "guides" | "feedback") {
     activePage = page;
     if (page === "setup" && !setupStatus && !setupDetecting) void refreshSetup();
+  }
+
+  // ---- feedback -------------------------------------------------------------
+
+  const FEEDBACK_CATEGORIES = [
+    { id: "feature", label: "Feature request" },
+    { id: "change", label: "Change something existing" },
+    { id: "bug", label: "Something is broken" },
+    { id: "other", label: "Anything else" }
+  ];
+  // Formspree's free tier is 50 submissions a month, and a stuck button could
+  // burn it in seconds. This is a guard against accidents, not against a
+  // determined user.
+  const FEEDBACK_MIN_GAP_MS = 60_000;
+  const FEEDBACK_DAILY_CAP = 5;
+
+  let feedbackCategory = "feature";
+  let feedbackMessage = "";
+  let feedbackEmail = "";
+  let feedbackIncludeDiagnostics = true;
+  let feedbackSending = false;
+  let feedbackResult: { ok: boolean; text: string } | null = null;
+
+  $: feedbackDiagnostics = feedbackIncludeDiagnostics
+    ? `KeyRail ${config.version ?? "?"} - ${navigator.userAgent}`
+    : "";
+  $: feedbackTooLong = feedbackMessage.length > 5000;
+  $: feedbackCanSend = feedbackMessage.trim().length > 0 && !feedbackTooLong && !feedbackSending;
+
+  function feedbackQuotaLeft() {
+    const today = new Date().toDateString();
+    if (localStorage.getItem("keyrail-feedback-day") !== today) return FEEDBACK_DAILY_CAP;
+    return FEEDBACK_DAILY_CAP - Number(localStorage.getItem("keyrail-feedback-count") ?? 0);
+  }
+
+  function noteFeedbackSent() {
+    const today = new Date().toDateString();
+    const used = localStorage.getItem("keyrail-feedback-day") === today
+      ? Number(localStorage.getItem("keyrail-feedback-count") ?? 0)
+      : 0;
+    localStorage.setItem("keyrail-feedback-day", today);
+    localStorage.setItem("keyrail-feedback-count", String(used + 1));
+    localStorage.setItem("keyrail-feedback-last", String(Date.now()));
+  }
+
+  function feedbackAsText() {
+    const label = FEEDBACK_CATEGORIES.find((c) => c.id === feedbackCategory)?.label ?? feedbackCategory;
+    return [
+      `[${label}]`,
+      feedbackMessage.trim(),
+      feedbackEmail.trim() ? `\nContact: ${feedbackEmail.trim()}` : "",
+      feedbackDiagnostics ? `\n${feedbackDiagnostics}` : ""
+    ].filter(Boolean).join("\n");
+  }
+
+  async function sendFeedback() {
+    if (!feedbackCanSend) return;
+
+    const since = Date.now() - Number(localStorage.getItem("keyrail-feedback-last") ?? 0);
+    if (since < FEEDBACK_MIN_GAP_MS) {
+      feedbackResult = { ok: false, text: "Give it a minute between messages." };
+      return;
+    }
+    if (feedbackQuotaLeft() <= 0) {
+      feedbackResult = {
+        ok: false,
+        text: "That is enough for one day. Use the GitHub option below if you have more."
+      };
+      return;
+    }
+
+    feedbackSending = true;
+    feedbackResult = null;
+    try {
+      await invoke("send_feedback", {
+        category: FEEDBACK_CATEGORIES.find((c) => c.id === feedbackCategory)?.label ?? feedbackCategory,
+        message: feedbackMessage,
+        email: feedbackEmail,
+        diagnostics: feedbackDiagnostics
+      });
+      noteFeedbackSent();
+      feedbackResult = { ok: true, text: "Sent. Thank you, it genuinely gets read." };
+      feedbackMessage = "";
+      logEvent("feedback sent");
+    } catch (error) {
+      feedbackResult = {
+        ok: false,
+        text: `Could not send: ${errorText(error)}. Copy it below and nothing is lost.`
+      };
+    } finally {
+      feedbackSending = false;
+    }
+  }
+
+  async function copyFeedback() {
+    try {
+      await navigator.clipboard.writeText(feedbackAsText());
+      pushToast("Copied. Paste it anywhere you like.", "success");
+    } catch {
+      pushToast("Could not copy. Select the text and copy it manually.", "error");
+    }
+  }
+
+  function openFeedbackIssue() {
+    const label = FEEDBACK_CATEGORIES.find((c) => c.id === feedbackCategory)?.label ?? "Feedback";
+    const title = encodeURIComponent(`[${label}] ${feedbackMessage.trim().slice(0, 60)}`);
+    const body = encodeURIComponent(feedbackAsText());
+    void openExternal(`https://github.com/tonigotev/KeyRail/issues/new?title=${title}&body=${body}`);
   }
 
   // ---- integration setup ----------------------------------------------------
@@ -332,6 +512,24 @@
 
   $: if (browserBridge.connected) noteBridgeVerified("browser");
   $: if (discordBridgeClients > 0) noteBridgeVerified("discord");
+
+  // Setup is a job you finish, so it stops taking a permanent slot in the nav
+  // once it is done. It stays reachable from Settings forever, and reappears on
+  // its own if an integration is later found to be missing.
+  //
+  // Dismissal exists because "both verified" would never be true for someone who
+  // has no intention of installing Discord, and nagging them forever is worse
+  // than letting them say so.
+  let setupDismissed = localStorage.getItem("keyrail-setup-dismissed") === "1";
+  $: setupFinished = (browserEverConnected && discordEverConnected) || setupDismissed;
+  $: showSetupInNav = !setupFinished || activePage === "setup";
+
+  function dismissSetupNav() {
+    setupDismissed = true;
+    localStorage.setItem("keyrail-setup-dismissed", "1");
+    pushToast("Setup moved to Settings. Everything there is still available.", "info");
+    setPage("bindings");
+  }
 
   // Which actions stop working, or work worse, without an integration from
   // Setup. Verified against the daemon rather than guessed:
@@ -632,7 +830,6 @@
     onboardingBindingId = "";
     onboardingCreatedBindingIds = [];
     onboardingTestState = "idle";
-    onboardingDiscordOptIn = false;
     onboardingOpen = true;
   }
 
@@ -717,22 +914,28 @@
     }
   }
 
-  function cleanPresetConfig(): AppConfig {
+  // A new preset starts as a copy of what you have now. An empty one was the
+  // obvious reading of "new", but it clears the bindings list the moment you
+  // click, which is indistinguishable from having lost everything - and the
+  // usual reason to make a preset is to vary a setup you already like, not to
+  // start from nothing. Copying also removes the old footgun for free: creating
+  // a preset writes over config.json too, so an empty one with no preset active
+  // wiped the only copy of your bindings. Writing back identical content can't.
+  function copyOfCurrentConfig(): AppConfig {
     return withConfigDefaults({
-      ...defaultConfig,
-      settings: { ...config.settings },
+      ...structuredClone(config),
       onboarding: {
         ...config.onboarding,
         completed: true
-      },
-      bindings: []
+      }
     });
   }
 
-  async function createCleanPreset() {
+  async function createPresetFromCurrent() {
     await runWithFeedback("preset-create", "Preset created.", async () => {
       await saveConfigOnly();
-      const nextConfig = cleanPresetConfig();
+
+      const nextConfig = copyOfCurrentConfig();
       const created = await invoke<PresetInfo>("create_preset", { config: nextConfig });
       config = nextConfig;
       activePreset = created.name;
@@ -740,7 +943,15 @@
       await invoke("ensure_daemon");
       await invoke("send_daemon_command", { command: "reload" });
       await refreshStatus();
-      logEvent(`created ${created.name}`, "ok", created.path);
+      logEvent(`created ${created.name} from the current bindings`, "ok", created.path);
+
+      const count = nextConfig.bindings.length;
+      pushToast(
+        count === 0
+          ? `${created.name} is ready. It starts empty because you have no bindings yet.`
+          : `${created.name} starts as a copy of your ${count} binding${count === 1 ? "" : "s"}. Edits here won't touch the other presets.`,
+        "info"
+      );
     });
   }
 
@@ -947,20 +1158,12 @@
   }
 
   async function refreshBrowserBridge(showVisual = true) {
-    const wasConnected = browserBridge.connected;
     if (showVisual) browserBridgeCheckingVisual = true;
     try {
       await Promise.all([
         runWithFeedback("browser-status", "Browser bridge checked.", refreshBrowserBridgeQuietly, false),
         showVisual ? wait(1000) : Promise.resolve()
       ]);
-      if (showVisual && (browserBridge.connected || browserBridge.connected !== wasConnected)) {
-        browserBridgePulse = true;
-        if (browserBridgePulseTimer) clearTimeout(browserBridgePulseTimer);
-        browserBridgePulseTimer = setTimeout(() => {
-          browserBridgePulse = false;
-        }, 900);
-      }
     } finally {
       browserBridgeCheckingVisual = false;
     }
@@ -1007,15 +1210,54 @@
     });
   }
 
+  // Owns its own busy flag instead of the shared busyAction. Two reasons, and
+  // both of them stuck this button on "Restarting..." forever:
+  //
+  //   refreshStatus() wraps itself in runWithFeedback, so calling it from inside
+  //   another runWithFeedback overwrote busyAction and then cleared it to "" on
+  //   the way out, destroying the outer action's value mid-operation.
+  //
+  //   the label went through isBusy(), a plain function. Reading reactive state
+  //   through a call hides the dependency, so the label had no reliable reason
+  //   to re-render when the flag changed.
+  //
+  // A dedicated variable referenced straight from the template has neither
+  // problem, and the poll uses refreshStatusQuietly so nothing nests.
+  let adminRestartBusy = false;
+
   async function restartDaemonAsAdmin() {
-    await runWithFeedback("restart-admin", "Requested administrator restart. Accept the Windows prompt.", async () => {
+    if (adminRestartBusy) return;
+    adminRestartBusy = true;
+    pushToast("Requested administrator restart. Accept the Windows prompt.", "info");
+    try {
       await invoke("restart_daemon_as_admin");
       logEvent("requested administrator restart", "info");
-      // Give the elevated instance time to take over the pipe, then refresh.
-      await wait(1200);
-      await refreshStatus();
+
+      // The backend returns the moment the elevated daemon is asked for, because
+      // the UAC prompt runs at the user's pace. Poll for the result rather than
+      // guessing a delay: a fixed wait either gives up while the prompt is still
+      // open or stalls long after the daemon is already back. This reads
+      // daemonStatus directly because the daemonElevated reactive is recomputed
+      // on Svelte's schedule and can still be stale right after an await.
+      const isElevated = () => /daemon elevated:\s*yes/i.test(daemonStatus);
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await wait(500);
+        await refreshStatusQuietly();
+        if (isElevated()) break;
+      }
       await refreshStartupStatus();
-    });
+      if (isElevated()) {
+        pushToast("Daemon is now running as administrator.", "success");
+      } else {
+        logEvent("daemon did not come back elevated", "error", "the prompt may have been declined");
+        pushToast("The daemon did not come back elevated.", "error");
+      }
+    } catch (error) {
+      logEvent("restart-admin failed", "error", String(error));
+      pushToast(String(error), "error");
+    } finally {
+      adminRestartBusy = false;
+    }
   }
 
   async function enableStartupForOnboardingDefault() {
@@ -1037,7 +1279,6 @@
     const steps = ["welcome", "startup", "mode", "binding"] as string[];
     if (onboardingBindingId) steps.push("test");
     if (onboardingStarter === "media_picker_bundle") steps.push("browser");
-    if (onboardingDiscordOptIn) steps.push("discord");
     steps.push("finish");
     return steps;
   }
@@ -1099,11 +1340,7 @@
       touchOnboarding();
       void saveConfigOnly();
     }
-    if (onboardingCurrent === "discord") {
-      config.onboarding.seen_discord_bridge = true;
-      touchOnboarding();
-      void saveConfigOnly();
-    }
+
     moveOnboardingStep(Math.min(onboardingStep + 1, onboardingSteps.length - 1), "forward");
   }
 
@@ -1716,7 +1953,7 @@
     const key = normalizeKey(event.key);
     if (!key) return;
 
-    // Any combo is accepted here â€” even one already in use. Conflicts are surfaced
+    // Any combo is accepted here ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â even one already in use. Conflicts are surfaced
     // by duplicateHotkeys and block saving until resolved, so a straight swap works
     // without needing a temporary placeholder hotkey.
     binding.hotkey = [...parts, key].join("+");
@@ -1927,16 +2164,30 @@
     return "status checked";
   }
 
+  // The heading above already counts armed bindings, so this line reports
+  // something it cannot: which detection backend actually owns them.
+  //
+  // It used to look for "=>" while the daemon emits "->", so the only line it
+  // ever matched was "claimed by RegisterHotKey: ...", giving a permanent and
+  // meaningless "1 binding is armed."
   function summarizeStatus(lines: string[]) {
-    const bindingLines = lines.filter((line) => line.includes("=>") || line.toLowerCase().includes("hotkey"));
-    if (bindingLines.length === 1) return "1 binding is armed.";
-    if (bindingLines.length > 1) return `${bindingLines.length} bindings are armed.`;
-    return lines[0] ?? "Ready.";
+    const armed = lines.filter((line) => line.trimStart().startsWith("armed "));
+    if (armed.length === 0) return lines[0] ?? "Ready.";
+
+    const claimed = armed.filter((line) => line.includes("(claimed)")).length;
+    const fallback = armed.length - claimed;
+
+    if (fallback === 0) return "All claimed exclusively.";
+    if (claimed === 0) return `${fallback} via raw input only.`;
+    return `${claimed} claimed, ${fallback} via raw input.`;
   }
 
-  function isBusy(action: string) {
-    return busyAction === action;
-  }
+  // Reactive rather than a plain function on purpose. Every "...ing" label in
+  // the app goes through this, and a plain function hides its read of busyAction
+  // from the template, leaving those labels free to render once and stay stale.
+  // Rebuilding the closure whenever busyAction changes makes the dependency
+  // explicit, so all 14 call sites update.
+  $: isBusy = (action: string) => busyAction === action;
 
   async function minimizeWindow() {
     await getCurrentWindow().minimize();
@@ -2010,8 +2261,11 @@
 
       <nav class="side-nav" aria-label="Main sections">
         <button class:active={activePage === "bindings"} on:click={() => setPage("bindings")}>Bindings</button>
-        <button class:active={activePage === "setup"} on:click={() => setPage("setup")}>Setup</button>
+        {#if showSetupInNav}
+          <button class:active={activePage === "setup"} on:click={() => setPage("setup")}>Setup</button>
+        {/if}
         <button class:active={activePage === "settings"} on:click={() => setPage("settings")}>Settings</button>
+        <button class:active={activePage === "feedback"} on:click={() => setPage("feedback")}>Feedback</button>
       </nav>
 
       <section class="log-panel">
@@ -2062,7 +2316,12 @@
             </select>
           </label>
           <div class="preset-actions">
-            <button class="ghost" disabled={!!busyAction} on:click={createCleanPreset}>
+            <button
+              class="ghost"
+              disabled={!!busyAction}
+              title="Creates a new preset containing a copy of your current bindings"
+              on:click={createPresetFromCurrent}
+            >
               {isBusy("preset-create") ? "Creating..." : "New preset"}
             </button>
             <button class="danger" disabled={!!busyAction || !activePreset} on:click={requestDeletePreset}>
@@ -2074,6 +2333,33 @@
           <input type="checkbox" checked={advancedVisible} on:change={toggleAdvanced} />
           Advanced mode
         </label>
+      </section>
+
+      <section class="config-panel">
+        <h2>Updates</h2>
+        <p>KeyRail {appVersion}</p>
+        <div class="update-box">
+          <div class="update-actions">
+            <button
+              class="ghost"
+              disabled={updateState === "checking" || updateState === "downloading"}
+              on:click={() => checkForUpdates(true)}
+            >
+              {updateState === "checking" ? "Checking..." : "Check for updates"}
+            </button>
+            {#if updateState === "ready" && updateAvailable}
+              <button disabled={updateState === "downloading"} on:click={installUpdate}>
+                Install {updateAvailable.version}
+              </button>
+            {/if}
+          </div>
+          {#if updateMessage}
+            <p class="update-message" class:error={updateState === "error"}>{updateMessage}</p>
+          {/if}
+          {#if updateState === "ready"}
+            <p class="update-note">KeyRail will close and reopen to finish installing.</p>
+          {/if}
+        </div>
       </section>
 
       <section class="theme-panel">
@@ -2659,17 +2945,17 @@
 
             <button
               class="primary"
-              disabled={!!busyAction || daemonElevated}
+              disabled={!!busyAction || adminRestartBusy || daemonElevated}
               on:click={restartDaemonAsAdmin}
             >
-              {isBusy("restart-admin") ? "Restarting..." : daemonElevated ? "Already elevated" : "Restart daemon as administrator"}
+              {adminRestartBusy ? "Restarting..." : daemonElevated ? "Already elevated" : "Restart daemon as administrator"}
             </button>
 
             <label class="inline-check">
               <input
                 type="checkbox"
                 checked={startupStatus.elevated_enabled}
-                disabled={!!busyAction}
+                disabled={!!busyAction || adminRestartBusy}
                 on:change={(event) => setDaemonElevatedStartup(event.currentTarget.checked)}
               />
               <span>Start with Windows as administrator (via a scheduled task, no UAC prompt each login)</span>
@@ -2693,60 +2979,38 @@
             </article>
           {/if}
 
-          <article class:checking={browserBridgeCheckingVisual} class:connected={browserBridge.connected} class:pulse={browserBridgePulse} class="settings-card bridge-card wide" on:pointerenter={setCardHoverDirection}>
+          <!-- Setup's permanent home. The sidebar entry disappears once setup is
+               finished, so this is what keeps it reachable afterwards. -->
+          <article class="settings-card wide" on:pointerenter={setCardHoverDirection}>
             <div class="settings-card-head">
               <div>
-                <h3>Browser Media Picker</h3>
-                <p>Optional extension for controlling media inside browser tabs.</p>
+                <h3>Integration setup</h3>
+                <p>Browser media bridge and Discord audio bridge, with the guides.</p>
               </div>
-              <span>Optional</span>
+              <span>{setupFinished ? "Done" : "Incomplete"}</span>
             </div>
-
-            <div class="bridge-status">
-              <span class:online={browserBridge.connected} class="bridge-dot"></span>
-              <div>
-                {#if browserBridge.connected}
-                  <strong>Connected</strong>
-                  <p>{browserBridge.clients} {browserBridge.clients === 1 ? "browser" : "browsers"} connected, {browserBridge.targets} {browserBridge.targets === 1 ? "media tab" : "media tabs"} visible.</p>
-                {:else}
-                  <strong>{browserBridgeCheckingVisual ? "Checking connection" : "Not connected"}</strong>
-                  <p>Set up the extension for reliable browser skip. Without it, media tabs like YouTube, YouTube Music, Spotify, and similar sites are grouped under one browser entry, and Next/Previous only work when the browser exposes those controls to Windows.</p>
-                {/if}
-              </div>
-            </div>
-
-            {#if !browserBridge.connected}
-              <div class="setup-steps">
-                <div><span>1</span> Choose your browser and install the media picker extension.</div>
-                <div><span>2</span> Refresh any browser tab that is playing media.</div>
-                <div><span>3</span> Press Check to confirm it connected.</div>
-              </div>
-            {/if}
-
             <div class="bridge-actions">
-              <button class:checking={browserBridgeCheckingVisual} class="ghost bridge-check" disabled={!!busyAction || browserBridgeCheckingVisual} on:click={() => refreshBrowserBridge()}>
-                Check
-              </button>
-              <button class="primary-soft" disabled={!!busyAction} on:click={() => openExtensionsPage("brave")}>
-                {isBusy("extensions-brave") ? "Opening..." : "Brave"}
-              </button>
-              <button class="ghost" disabled={!!busyAction} on:click={() => openExtensionsPage("chrome")}>
-                {isBusy("extensions-chrome") ? "Opening..." : "Chrome"}
-              </button>
-              <button class="ghost" disabled={!!busyAction} on:click={() => openExtensionsPage("edge")}>
-                {isBusy("extensions-edge") ? "Opening..." : "Edge"}
-              </button>
-            </div>
-
-            <div class="settings-note">
-              The media picker still works without the extension, but browser skip is not reliable there. Install the extension to show separate playable tabs and make Next/Previous target the chosen tab.
+              <button class="primary-soft" on:click={() => setPage("setup")}>Open Setup</button>
+              <button class="ghost" on:click={() => setPage("guides")}>Guides</button>
+              {#if setupDismissed}
+                <button
+                  class="ghost"
+                  on:click={() => {
+                    setupDismissed = false;
+                    localStorage.removeItem("keyrail-setup-dismissed");
+                  }}
+                >
+                  Show in sidebar again
+                </button>
+              {/if}
             </div>
           </article>
+
         </div>
       {/if}
 
       {#if activePage === "setup"}
-        <div class="toolbar">
+        <div class="toolbar page-toolbar">
           <div>
             <h2>Integration setup</h2>
             <p>Get the browser and Discord bridges working, one step at a time</p>
@@ -3108,6 +3372,9 @@
             <footer class="wiz-foot">
               <button class="ghost" on:click={() => goToStep(2)}>Back</button>
               <div class="wiz-foot-right">
+                {#if !setupFinished}
+                  <button class="ghost" on:click={dismissSetupNav}>Done, hide from sidebar</button>
+                {/if}
                 <button class="primary" on:click={() => setPage("bindings")}>Go to bindings</button>
               </div>
             </footer>
@@ -3115,8 +3382,95 @@
         </section>
       {/if}
 
+      {#if activePage === "feedback"}
+        <div class="toolbar page-toolbar">
+          <div>
+            <h2>Feedback</h2>
+            <p>Ideas, complaints and bug reports go straight to the person who wrote this</p>
+          </div>
+        </div>
+
+        <div class="toasts" aria-live="polite">
+          {#each toasts as toast}
+            <div class:error={toast.type === "error"} class:success={toast.type === "success"} class:info={toast.type === "info"} class="toast">
+              {toast.text}
+            </div>
+          {/each}
+        </div>
+
+        <section class="wiz-panel feedback-panel">
+          <header class="wiz-head">
+            <h3>What would you change?</h3>
+            <p>
+              Missing feature, something that annoys you, something plainly broken. Short and specific beats long
+              and polite.
+            </p>
+          </header>
+
+          <div class="feedback-form">
+            <label class="feedback-field">
+              <span>This is about</span>
+              <select bind:value={feedbackCategory}>
+                {#each FEEDBACK_CATEGORIES as category}
+                  <option value={category.id}>{category.label}</option>
+                {/each}
+              </select>
+            </label>
+
+            <label class="feedback-field">
+              <span>Your message</span>
+              <textarea
+                bind:value={feedbackMessage}
+                rows="7"
+                placeholder="I want a binding that..."
+                maxlength="5200"
+              ></textarea>
+              <small class:over={feedbackTooLong}>{feedbackMessage.length} / 5000</small>
+            </label>
+
+            <label class="feedback-field">
+              <span>Email, only if you want a reply</span>
+              <input type="email" bind:value={feedbackEmail} placeholder="optional" />
+            </label>
+
+            <label class="wiz-check">
+              <input type="checkbox" bind:checked={feedbackIncludeDiagnostics} />
+              <span>Attach app and system version</span>
+            </label>
+
+            {#if feedbackIncludeDiagnostics}
+              <!-- Shown in full rather than described, so there is no question
+                   about what leaves the machine. -->
+              <code class="feedback-diagnostics">{feedbackDiagnostics}</code>
+            {/if}
+
+            {#if feedbackResult}
+              <div class:ok={feedbackResult.ok} class="feedback-result">{feedbackResult.text}</div>
+            {/if}
+
+            <div class="wiz-actions">
+              <button class="primary" disabled={!feedbackCanSend} on:click={sendFeedback}>
+                {feedbackSending ? "Sending..." : "Send"}
+              </button>
+              <button class="ghost" disabled={!feedbackMessage.trim()} on:click={openFeedbackIssue}>
+                Open as GitHub issue
+              </button>
+              <button class="ghost" disabled={!feedbackMessage.trim()} on:click={copyFeedback}>
+                Copy
+              </button>
+            </div>
+
+            <p class="feedback-note">
+              Nothing is sent until you press Send, and nothing else is collected: no bindings, no config, no
+              tracking. A GitHub issue is public and others can add to it, which is usually the more useful
+              option for a feature request.
+            </p>
+          </div>
+        </section>
+      {/if}
+
       {#if activePage === "guides"}
-        <div class="toolbar">
+        <div class="toolbar page-toolbar">
           <div>
             <h2>Guides</h2>
             <p>{guides.length} walkthroughs</p>
@@ -3307,10 +3661,6 @@
                 <div class="inline-warning">Duplicate of {onboardingTestBinding.hotkey} already bound to {duplicateOwner(onboardingTestBinding)}.</div>
               {/if}
             {/if}
-            <label class="inline-check onboarding-discord-opt">
-              <input type="checkbox" bind:checked={onboardingDiscordOptIn} />
-              <span>Show advanced Discord/Vencord bridge setup</span>
-            </label>
           </section>
         {:else if onboardingCurrent === "test"}
           <section class="onboarding-step">
@@ -3348,12 +3698,6 @@
               <button class="ghost" disabled={!!busyAction} on:click={() => openExtensionsPage("chrome")}>Chrome</button>
               <button class="ghost" disabled={!!busyAction} on:click={() => openExtensionsPage("edge")}>Edge</button>
             </div>
-          </section>
-        {:else if onboardingCurrent === "discord"}
-          <section class="onboarding-step">
-            <h2>Advanced Discord bridge</h2>
-            <p>Discord-specific audio and microphone switching needs the Vencord bridge. One-click setup is not in this app yet, so this stays optional and manual for now.</p>
-            <div class="settings-note">TODO hook: connect this to a future Vencord bridge setup routine. If your bridge is already installed, Discord controls will work through the daemon bridge.</div>
           </section>
         {:else}
           <section class="onboarding-step">
