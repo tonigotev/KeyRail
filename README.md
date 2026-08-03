@@ -38,7 +38,7 @@ integrations. Neither is required.
 **Media**
 
 - A picker overlay listing everything currently playing, including individual
-  browser tabs, with artwork
+  browser tabs, with thumbnail
 - Next, previous and play/pause aimed at the target you picked, not whatever
   Windows decided owns the media keys
 - Contextual controls that follow the focused app when you have not picked one
