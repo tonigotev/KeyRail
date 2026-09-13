@@ -123,5 +123,36 @@ export const guides: Guide[] = [
         text: "Press Status to see live Raw Input counters: events seen, matches, dispatches, and ignored held-key repeats. If a binding is not firing, that panel says whether the key was seen at all."
       }
     ]
+  },
+  {
+    id: "rescue-menu",
+    title: "Use the rescue menu when the machine freezes",
+    summary:
+      "A process list and killer that comes up when Task Manager will not: over fullscreen games, during memory thrashing, next to a hung app.",
+    tag: "Daemon",
+    minutes: 2,
+    steps: [
+      {
+        text: "Press Ctrl+Alt+Shift+End (change it under Settings > Rescue menu). The screen switches to a plain black desktop with a process table, the same trick Ctrl+Alt+Del uses, so it appears over exclusive-fullscreen games too."
+      },
+      {
+        text: "If the daemon is certain which process is freezing the machine (a memory hog, a realtime-priority spinner, a disk storm, a fork bomb) it pauses that process first, so the screen can come back at all. The status line says PAUSED with the reason: Enter kills it, Esc resumes it as if nothing happened."
+      },
+      {
+        text: "If the screen still does not come back within a couple of seconds, press the hotkey again: the paused process is killed outright, without waiting for the menu."
+      },
+      {
+        text: "Rows are ranked by how likely they are the culprit: a HUNG app, a process hammering the disk, one pegging a core, one growing memory or threads. The top row is usually the one to kill. S changes the sort order; R re-sorts."
+      },
+      {
+        text: "Up/Down selects. Enter then Y force-ends the process and waits for it to actually exit. C asks the app to close politely instead. Type / and a few letters to filter by name. PgDn shows every process."
+      },
+      {
+        text: "The bottom line always says what happened. A protected process (anti-cheat, antivirus) or one Windows cannot run without is refused with the reason; a kill the daemon cannot perform without administrator rights says so."
+      },
+      {
+        text: "Esc returns to your normal desktop. If nothing is pressed for three minutes it returns on its own."
+      }
+    ]
   }
 ];

@@ -4,6 +4,7 @@
 #include "clipboard_history.h"
 #include "discord_bridge.h"
 #include "media_sessions.h"
+#include "rescue.h"
 
 #include <nlohmann/json.hpp>
 
@@ -141,6 +142,8 @@ std::string ControlPipe::dispatchCommand(const std::string& body) {
             else if (target == "media_picker_cancel") ok = cancelMediaPicker(&report);
             else if (target == "clipboard_quick") ok = openClipboardQuickPicker(&report);
             else if (target == "clipboard_history") ok = openClipboardHistoryPicker(&report);
+            else if (target == "rescue_open") ok = triggerRescue(&report);
+            else if (target == "rescue_close") ok = dismissRescue(&report);
             else report = L"unknown trigger target";
 
             json out;

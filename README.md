@@ -54,6 +54,10 @@ integrations. Neither is required.
 **Windows and apps**
 
 - Close the focused app, or force-kill it when it stops responding
+- A rescue menu (Ctrl+Alt+Shift+End) that still opens when the machine is
+  frozen and Task Manager will not: it lives on a private desktop like
+  Ctrl+Alt+Del, ranks processes by what is actually wedging the system, and
+  says why a kill did not work instead of failing silently
 - Launch applications with arguments
 - Run scripts through Python, PowerShell, Node, AutoHotkey or any interpreter
 - Run arbitrary shell commands
@@ -146,6 +150,7 @@ npm run tauri -- dev
 
 ```text
 keyrail_daemon/     C++ daemon: detection, actions, overlays, control pipe
+keyrail_daemon/stress/     Stressors for testing the rescue menu (not shipped)
 keyrail_ui/      Tauri + Svelte settings UI and installer config
 integrations/browser/      Chromium extension exposing per-tab media targets
 integrations/vencord/      Vencord plugin for Discord device switching

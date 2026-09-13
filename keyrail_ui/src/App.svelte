@@ -35,10 +35,31 @@
     seen_discord_bridge: boolean;
   };
 
+  type RescueWeights = {
+    hung: number;
+    faults: number;
+    cpu: number;
+    priv: number;
+    threads: number;
+    io: number;
+  };
+
+  type RescueSettings = {
+    enabled: boolean;
+    hotkey: string;
+    sample_interval_ms: number;
+    row_count: number;
+    use_private_desktop: boolean;
+    title_deadline_ms: number;
+    auto_pause: boolean;
+    weights: RescueWeights;
+  };
+
   type AppConfig = {
     version: number;
     settings: AppSettings;
     onboarding: OnboardingState;
+    rescue: RescueSettings;
     bindings: BindingSpec[];
   };
 
@@ -127,6 +148,16 @@
       version: 1,
       seen_media_picker_extension: false,
       seen_discord_bridge: false
+    },
+    rescue: {
+      enabled: true,
+      hotkey: "ctrl+alt+shift+end",
+      sample_interval_ms: 1000,
+      row_count: 15,
+      use_private_desktop: true,
+      title_deadline_ms: 50,
+      auto_pause: true,
+      weights: { hung: 5, faults: 4, cpu: 3, priv: 2, threads: 1, io: 2 }
     },
     bindings: []
   };
@@ -798,6 +829,28 @@
     config = { ...config, settings: { ...config.settings } };
   }
 
+  function touchRescue() {
+    config = { ...config, rescue: { ...config.rescue } };
+  }
+
+  // The daemon holds the rescue chord with RegisterHotKey, so the keydown would
+  // never reach this field. Suspending releases it (and the normal bindings)
+  // for as long as the field has focus.
+  function captureRescueHotkey(event: KeyboardEvent) {
+    event.preventDefault();
+    const parts: string[] = [];
+    if (event.ctrlKey) parts.push("ctrl");
+    if (event.altKey) parts.push("alt");
+    if (event.shiftKey) parts.push("shift");
+    if (event.metaKey) parts.push("win");
+
+    const key = normalizeKey(event.key);
+    if (!key) return;
+
+    config.rescue.hotkey = [...parts, key].join("+");
+    touchRescue();
+  }
+
   function setSimpleLog(value: boolean) {
     simpleLog = value;
     localStorage.setItem("hotkey-log-mode", value ? "simple" : "detailed");
@@ -889,6 +942,14 @@
       onboarding: {
         ...defaultConfig.onboarding,
         ...(value.onboarding ?? {})
+      },
+      rescue: {
+        ...defaultConfig.rescue,
+        ...(value.rescue ?? {}),
+        weights: {
+          ...defaultConfig.rescue.weights,
+          ...(value.rescue?.weights ?? {})
+        }
       },
       bindings: (value.bindings ?? []).filter((binding) => !isObsoleteCancelAction(binding.action))
     };
@@ -2963,6 +3024,92 @@
 
             <div class="settings-note">
               Elevated startup registers a Windows scheduled task with highest privileges and replaces the normal sign-in launch. Restarting as administrator shows a one-time Windows UAC prompt.
+            </div>
+          </article>
+
+          <article class="settings-card" on:pointerenter={setCardHoverDirection}>
+            <div class="settings-card-head">
+              <div>
+                <h3>Rescue menu</h3>
+                <p>A minimal process list and killer that still comes up when the machine is frozen and Task Manager will not.</p>
+              </div>
+              <span>{config.rescue.enabled ? "Enabled" : "Off"}</span>
+            </div>
+
+            <label class="inline-check">
+              <input
+                type="checkbox"
+                checked={config.rescue.enabled}
+                on:change={(event) => {
+                  config.rescue.enabled = event.currentTarget.checked;
+                  touchRescue();
+                }}
+              />
+              <span>Keep the rescue menu armed</span>
+            </label>
+
+            <div class="settings-fields">
+              <label>
+                <span>Rescue hotkey</span>
+                <input
+                  value={config.rescue.hotkey}
+                  placeholder="ctrl+alt+shift+end"
+                  on:focus={() => void suspendDaemonHotkeys()}
+                  on:blur={() => void invoke("send_daemon_command", { command: "resume_hotkeys" }).catch(() => undefined)}
+                  on:keydown={captureRescueHotkey}
+                  on:input={(event) => {
+                    config.rescue.hotkey = event.currentTarget.value;
+                    touchRescue();
+                  }}
+                />
+              </label>
+
+              <label>
+                <span>Rows shown</span>
+                <select
+                  value={String(config.rescue.row_count)}
+                  on:change={(event) => {
+                    config.rescue.row_count = Number(event.currentTarget.value);
+                    touchRescue();
+                  }}
+                >
+                  <option value="10">10</option>
+                  <option value="15">15</option>
+                  <option value="20">20</option>
+                  <option value="25">25</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="inline-check">
+              <input
+                type="checkbox"
+                checked={config.rescue.use_private_desktop}
+                on:change={(event) => {
+                  config.rescue.use_private_desktop = event.currentTarget.checked;
+                  touchRescue();
+                }}
+              />
+              <span>Open on a private desktop (works over fullscreen games)</span>
+            </label>
+
+            <label class="inline-check">
+              <input
+                type="checkbox"
+                checked={config.rescue.auto_pause}
+                on:change={(event) => {
+                  config.rescue.auto_pause = event.currentTarget.checked;
+                  touchRescue();
+                }}
+              />
+              <span>Pause the process that is freezing the PC before opening the menu</span>
+            </label>
+
+            <div class="settings-note">
+              In the menu: Up/Down select, Enter then Y kills, C asks the app to close, / filters, S sorts, Esc leaves.
+              With pausing on, a process the daemon is certain is freezing the machine (a memory hog, a realtime spinner, a disk storm, a fork bomb) is frozen first so the screen can come back; Esc resumes it, Enter kills it, and pressing the hotkey a second time before the menu appears kills it without waiting.
+              Changing the hotkey, rows or pausing applies on save; turning the menu or the private desktop on or off needs a daemon restart.
+              Processes Windows itself depends on are refused, and a kill that cannot work says why instead of failing silently.
             </div>
           </article>
 

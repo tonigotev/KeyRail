@@ -106,6 +106,16 @@ fn default_config() -> Value {
             "seen_media_picker_extension": false,
             "seen_discord_bridge": false
         },
+        "rescue": {
+            "enabled": true,
+            "hotkey": "ctrl+alt+shift+end",
+            "sample_interval_ms": 1000,
+            "row_count": 15,
+            "use_private_desktop": true,
+            "title_deadline_ms": 50,
+            "auto_pause": true,
+            "weights": { "hung": 5, "faults": 4, "cpu": 3, "priv": 2, "threads": 1, "io": 2 }
+        },
         "bindings": [
             {
                 "id": "cycle-audio",

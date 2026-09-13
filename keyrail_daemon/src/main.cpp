@@ -23,6 +23,7 @@
 #include "display_state.h"
 #include "hotkey_registry.h"
 #include "media_sessions.h"
+#include "rescue.h"
 
 static constexpr UINT WM_KEYRAIL_RELOAD = WM_APP + 1;
 static constexpr UINT WM_KEYRAIL_QUIT = WM_APP + 2;
@@ -56,6 +57,12 @@ static void handleRawInput(HotkeyRegistry& registry, HRAWINPUT input) {
     if (keyboard.VKey == 0 || keyboard.VKey == 0xff) return;
 
     const bool pressed = (keyboard.Flags & RI_KEY_BREAK) == 0;
+
+    // The rescue chord is not a binding: it wakes the rescue threads directly
+    // and never reaches the registry. This is its backup path; the primary is
+    // RegisterHotKey on the rescue trigger thread.
+    if (rescueObserveRawKey(keyboard.VKey, pressed)) return;
+
     registry.dispatchRawKey(keyboard.VKey, pressed, raw->header.hDevice);
 
     if (registry.consumeQuitRequest()) PostQuitMessage(0);
@@ -150,6 +157,7 @@ static std::wstring getStatus(DaemonState& state) {
     if (!event.empty()) status += event + L"\n";
     status += state.registry.rawInputDebugStatus();
     status += describeOverlayVisibility();
+    status += describeRescueStatus();
     return status;
 }
 
@@ -208,6 +216,15 @@ int main() {
 
     loadAndApply(state, false);
 
+    // Started after the config is known and after the other subsystems, so its
+    // locked buffers and threads are sized for the real settings. It runs on
+    // its own threads from here on; the main thread is not on its panic path.
+    {
+        std::wstring rescueReport;
+        startRescue(state.activeConfig.rescue, &rescueReport);
+        wprintf(L"%ls", rescueReport.c_str());
+    }
+
     ControlPipe pipe(
         mainThreadId,
         WM_KEYRAIL_RELOAD,
@@ -244,6 +261,7 @@ int main() {
         }
 
         if (msg.message == WM_KEYRAIL_RESUME) {
+            resumeRescueTrigger();
             std::wstring status = state.registry.apply(state.activeConfig);
             status += state.rawInputStatus;
             setStatus(state, status);
@@ -265,6 +283,7 @@ int main() {
     }
 
     pipe.stop();
+    stopRescue();
     stopMediaTargetPolling();
     stopClipboardHistory();
     stopBrowserMediaBridge();

@@ -55,6 +55,16 @@ std::wstring defaultConfigText() {
     "seen_media_picker_extension": false,
     "seen_discord_bridge": false
   },
+  "rescue": {
+    "enabled": true,
+    "hotkey": "ctrl+alt+shift+end",
+    "sample_interval_ms": 1000,
+    "row_count": 15,
+    "use_private_desktop": true,
+    "title_deadline_ms": 50,
+    "auto_pause": true,
+    "weights": { "hung": 5, "faults": 4, "cpu": 3, "priv": 2, "threads": 1, "io": 2 }
+  },
   "bindings": [
     {
       "id": "cycle-audio",
@@ -205,6 +215,53 @@ static AppSettings parseSettings(const json& obj) {
     return settings;
 }
 
+static int readClampedInt(const json& obj, const char* key, int fallback, int low, int high) {
+    auto it = obj.find(key);
+    if (it == obj.end() || !it->is_number_integer()) return fallback;
+    return (std::max)(low, (std::min)(it->get<int>(), high));
+}
+
+static float readWeight(const json& obj, const char* key, float fallback) {
+    auto it = obj.find(key);
+    if (it == obj.end() || !it->is_number()) return fallback;
+    return (std::max)(0.0f, (std::min)(it->get<float>(), 100.0f));
+}
+
+static RescueSettings parseRescue(const json& obj) {
+    RescueSettings rescue;
+    if (!obj.is_object()) return rescue;
+
+    auto enabled = obj.find("enabled");
+    if (enabled != obj.end() && enabled->is_boolean()) rescue.enabled = enabled->get<bool>();
+
+    std::wstring hotkey = readString(obj, "hotkey");
+    if (!hotkey.empty()) rescue.hotkey = hotkey;
+
+    rescue.sampleIntervalMs = readClampedInt(obj, "sample_interval_ms", rescue.sampleIntervalMs, 250, 10000);
+    rescue.rowCount = readClampedInt(obj, "row_count", rescue.rowCount, 5, 60);
+    rescue.titleDeadlineMs = readClampedInt(obj, "title_deadline_ms", rescue.titleDeadlineMs, 10, 500);
+
+    auto autoPause = obj.find("auto_pause");
+    if (autoPause != obj.end() && autoPause->is_boolean()) rescue.autoPause = autoPause->get<bool>();
+
+    auto privateDesktop = obj.find("use_private_desktop");
+    if (privateDesktop != obj.end() && privateDesktop->is_boolean()) {
+        rescue.usePrivateDesktop = privateDesktop->get<bool>();
+    }
+
+    auto weights = obj.find("weights");
+    if (weights != obj.end() && weights->is_object()) {
+        rescue.weights.hung = readWeight(*weights, "hung", rescue.weights.hung);
+        rescue.weights.faults = readWeight(*weights, "faults", rescue.weights.faults);
+        rescue.weights.cpu = readWeight(*weights, "cpu", rescue.weights.cpu);
+        rescue.weights.priv = readWeight(*weights, "priv", rescue.weights.priv);
+        rescue.weights.threads = readWeight(*weights, "threads", rescue.weights.threads);
+        rescue.weights.io = readWeight(*weights, "io", rescue.weights.io);
+    }
+
+    return rescue;
+}
+
 ConfigLoadResult loadConfig() {
     ConfigLoadResult result;
     result.path = configPath();
@@ -234,6 +291,11 @@ ConfigLoadResult loadConfig() {
 
         auto settings = root.find("settings");
         if (settings != root.end()) config.settings = parseSettings(*settings);
+
+        // Absent section -> struct defaults, same as every other key here. The
+        // UI adds it on its next save; nothing is written back from the daemon.
+        auto rescue = root.find("rescue");
+        if (rescue != root.end()) config.rescue = parseRescue(*rescue);
 
         auto bindings = root.find("bindings");
         if (bindings == root.end() || !bindings->is_array()) {
