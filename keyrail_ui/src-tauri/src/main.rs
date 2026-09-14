@@ -114,6 +114,7 @@ fn default_config() -> Value {
             "use_private_desktop": true,
             "title_deadline_ms": 50,
             "auto_pause": true,
+            "style": "modern",
             "weights": { "hung": 5, "faults": 4, "cpu": 3, "priv": 2, "threads": 1, "io": 2 }
         },
         "bindings": [

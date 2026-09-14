@@ -63,6 +63,7 @@ std::wstring defaultConfigText() {
     "use_private_desktop": true,
     "title_deadline_ms": 50,
     "auto_pause": true,
+    "style": "modern",
     "weights": { "hung": 5, "faults": 4, "cpu": 3, "priv": 2, "threads": 1, "io": 2 }
   },
   "bindings": [
@@ -240,6 +241,9 @@ static RescueSettings parseRescue(const json& obj) {
     rescue.sampleIntervalMs = readClampedInt(obj, "sample_interval_ms", rescue.sampleIntervalMs, 250, 10000);
     rescue.rowCount = readClampedInt(obj, "row_count", rescue.rowCount, 5, 60);
     rescue.titleDeadlineMs = readClampedInt(obj, "title_deadline_ms", rescue.titleDeadlineMs, 10, 500);
+
+    std::wstring style = readString(obj, "style");
+    if (style == L"modern" || style == L"legacy") rescue.style = style;
 
     auto autoPause = obj.find("auto_pause");
     if (autoPause != obj.end() && autoPause->is_boolean()) rescue.autoPause = autoPause->get<bool>();

@@ -471,19 +471,11 @@ void tick() {
     target->windowPassMicros = micros(windowStart, qpcNow());
     target->windowPassTruncated = pass.truncated;
 
-    // "Not responding" without touching a window: owns a window, nothing wants
-    // a CPU, no thread is sitting in GetMessage. Held for a few ticks so an app
-    // caught between two messages is not accused.
-    for (uint32_t i = 0; i < target->count; ++i) {
-        ProcRecord& record = target->records[i];
-        const bool suspect = (record.flags & kFlagOwnsWindow)
-            && !(record.flags & kFlagNew)
-            && record.runnable == 0
-            && record.pumping == 0
-            && record.cpuCores < 0.001f;
-        record.hungTicks = suspect ? static_cast<uint16_t>(record.hungTicks + 1) : 0;
-        if (record.hungTicks >= kHungByStateTicks) record.flags |= kFlagHungByState;
-    }
+    // "Not responding" is IsHungAppWindow, set in the window pass. A thread-
+    // state guess (owns a window, nothing runnable, nobody in GetMessage) was
+    // tried and dropped: Qt, Electron and Chromium wait for messages through
+    // MsgWaitForMultipleObjectsEx, which reports a different wait reason, so
+    // every idle browser looked hung.
 
     scoreSnapshot(*target, weights);
 

@@ -32,6 +32,7 @@ bool rescueObserveRawKey(UINT vk, bool pressed);
 // Opens / closes the menu from the control pipe ("trigger" targets).
 bool triggerRescue(std::wstring* report);
 bool dismissRescue(std::wstring* report);
+bool dumpRescueBitmap(std::wstring* report);   // debug: writes %TEMP%\keyrail-rescue.bmp
 
 // Status block for the pipe, including the recent rescue log.
 std::wstring describeRescueStatus();

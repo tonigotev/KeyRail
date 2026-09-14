@@ -33,7 +33,11 @@ HANDLE g_thread = nullptr;
 HANDLE g_wake = nullptr;
 HANDLE g_stop = nullptr;
 SRWLOCK g_requestLock = SRWLOCK_INIT;
-Request g_pending;
+// A small ring so "kill this group" can queue every member at once.
+constexpr uint32_t kQueueSize = 64;
+Request g_queue[kQueueSize];
+uint32_t g_queueHead = 0;
+uint32_t g_queueTail = 0;
 uint32_t g_selfPid = 0;
 LARGE_INTEGER g_qpcFrequency{};
 std::atomic<bool> g_elevated{false};
@@ -242,14 +246,19 @@ DWORD WINAPI killThread(LPVOID) {
         const DWORD woke = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
         if (woke != WAIT_OBJECT_0 + 1) break;
 
-        Request request;
-        AcquireSRWLockExclusive(&g_requestLock);
-        request = g_pending;
-        g_pending = Request{};
-        ReleaseSRWLockExclusive(&g_requestLock);
-
-        if (request.op == Op::Close) doClose(request);
-        else if (request.op == Op::Kill) doKill(request);
+        for (;;) {
+            Request request;
+            AcquireSRWLockExclusive(&g_requestLock);
+            const bool have = g_queueHead != g_queueTail;
+            if (have) {
+                request = g_queue[g_queueHead % kQueueSize];
+                ++g_queueHead;
+            }
+            ReleaseSRWLockExclusive(&g_requestLock);
+            if (!have) break;
+            if (request.op == Op::Close) doClose(request);
+            else if (request.op == Op::Kill) doKill(request);
+        }
     }
     return 0;
 }
@@ -257,7 +266,7 @@ DWORD WINAPI killThread(LPVOID) {
 void submit(Op op, uint32_t pid, int64_t createTime) {
     if (!g_wake) return;
     AcquireSRWLockExclusive(&g_requestLock);
-    g_pending = Request{op, pid, createTime};
+    if (g_queueTail - g_queueHead < kQueueSize) g_queue[g_queueTail++ % kQueueSize] = Request{op, pid, createTime};
     ReleaseSRWLockExclusive(&g_requestLock);
     SetEvent(g_wake);
 }

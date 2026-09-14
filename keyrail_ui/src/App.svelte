@@ -52,6 +52,7 @@
     use_private_desktop: boolean;
     title_deadline_ms: number;
     auto_pause: boolean;
+    style: "modern" | "legacy";
     weights: RescueWeights;
   };
 
@@ -157,6 +158,7 @@
       use_private_desktop: true,
       title_deadline_ms: 50,
       auto_pause: true,
+      style: "modern",
       weights: { hung: 5, faults: 4, cpu: 3, priv: 2, threads: 1, io: 2 }
     },
     bindings: []
@@ -836,8 +838,26 @@
   // The daemon holds the rescue chord with RegisterHotKey, so the keydown would
   // never reach this field. Suspending releases it (and the normal bindings)
   // for as long as the field has focus.
+  let recordingRescue = false;
+
+  function startRescueCapture() {
+    if (recordingRescue) return;
+    recordingRescue = true;
+    void suspendDaemonHotkeys();
+  }
+
+  function stopRescueCapture() {
+    if (!recordingRescue) return;
+    recordingRescue = false;
+    void invoke("send_daemon_command", { command: "resume_hotkeys" }).catch(() => undefined);
+  }
+
   function captureRescueHotkey(event: KeyboardEvent) {
     event.preventDefault();
+    if (event.key === "Escape") {
+      stopRescueCapture();
+      return;
+    }
     const parts: string[] = [];
     if (event.ctrlKey) parts.push("ctrl");
     if (event.altKey) parts.push("alt");
@@ -848,8 +868,16 @@
     if (!key) return;
 
     config.rescue.hotkey = [...parts, key].join("+");
+    stopRescueCapture();
     touchRescue();
   }
+
+  // A binding on the same chord would never fire: the rescue hotkey is claimed
+  // exclusively and handled before the binding registry sees the key.
+  $: rescueConflict = config.bindings.find(
+    (binding) => binding.enabled && binding.hotkey.trim().toLowerCase() === config.rescue.hotkey.trim().toLowerCase()
+  );
+  $: rescueVisible = !searchQuery.trim() || "rescue menu".includes(searchQuery.trim().toLowerCase());
 
   function setSimpleLog(value: boolean) {
     simpleLog = value;
@@ -2500,6 +2528,130 @@
       </div>
 
       <div class="binding-list">
+        {#if rescueVisible}
+          <article class:disabled={!config.rescue.enabled} class="media-group" on:pointerenter={setCardHoverDirection}>
+            <div class="media-group-head">
+              <div>
+                <h3>Rescue menu</h3>
+                <p>Opens a process killer that still works when the PC is frozen and Task Manager will not come up.</p>
+              </div>
+              <div class="media-group-actions">
+                <span>{config.rescue.enabled ? "1 on" : "off"}</span>
+              </div>
+            </div>
+
+            <div class="media-control-list">
+              <div class:invalid={!!rescueConflict} class:disabled={!config.rescue.enabled} class="media-control-row">
+                <label class="switch" aria-label="Rescue menu enabled">
+                  <input
+                    type="checkbox"
+                    checked={config.rescue.enabled}
+                    on:change={(event) => {
+                      config.rescue.enabled = event.currentTarget.checked;
+                      touchRescue();
+                    }}
+                  />
+                  <span></span>
+                </label>
+
+                <input class="id" value="rescue-menu" readonly aria-label="Binding id" />
+
+                <div class="hotkey-editor">
+                  {#if hotkeyParts(config.rescue.hotkey).length}
+                    {#each hotkeyParts(config.rescue.hotkey) as part, partIndex}
+                      <span class:bad={!!rescueConflict} class="key-chip">{part}</span>
+                      {#if partIndex < hotkeyParts(config.rescue.hotkey).length - 1}
+                        <span class="plus">+</span>
+                      {/if}
+                    {/each}
+                  {:else}
+                    <span class="empty-hotkey">No hotkey</span>
+                  {/if}
+                  <button
+                    class:bad={!!rescueConflict}
+                    class:listening={recordingRescue}
+                    class="bind-button"
+                    type="button"
+                    on:click={startRescueCapture}
+                    on:keydown={(event) => recordingRescue && captureRescueHotkey(event)}
+                    on:blur={stopRescueCapture}
+                  >
+                    {recordingRescue ? "Listening..." : "Bind"}
+                  </button>
+                </div>
+
+                <div class="media-control-action">
+                  <strong>Open rescue menu</strong>
+                  {#if rescueConflict}
+                    <span>Also bound to {rescueConflict.id || "a binding"}; that binding will never fire.</span>
+                  {:else}
+                    <span>{config.rescue.enabled ? "armed" : "off"}</span>
+                  {/if}
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-fields">
+              <label class="inline-check">
+                <input
+                  type="checkbox"
+                  checked={config.rescue.use_private_desktop}
+                  on:change={(event) => {
+                    config.rescue.use_private_desktop = event.currentTarget.checked;
+                    touchRescue();
+                  }}
+                />
+                <span>Open on a private desktop (works over fullscreen games)</span>
+              </label>
+              <label class="inline-check">
+                <input
+                  type="checkbox"
+                  checked={config.rescue.auto_pause}
+                  on:change={(event) => {
+                    config.rescue.auto_pause = event.currentTarget.checked;
+                    touchRescue();
+                  }}
+                />
+                <span>Pause the process that is freezing the PC before opening</span>
+              </label>
+              <label>
+                <span>Look</span>
+                <select
+                  value={config.rescue.style}
+                  on:change={(event) => {
+                    config.rescue.style = event.currentTarget.value === "legacy" ? "legacy" : "modern";
+                    touchRescue();
+                  }}
+                >
+                  <option value="modern">Modern</option>
+                  <option value="legacy">Legacy (BIOS-style)</option>
+                </select>
+              </label>
+              <label>
+                <span>Rows shown</span>
+                <select
+                  value={String(config.rescue.row_count)}
+                  on:change={(event) => {
+                    config.rescue.row_count = Number(event.currentTarget.value);
+                    touchRescue();
+                  }}
+                >
+                  <option value="10">10</option>
+                  <option value="15">15</option>
+                  <option value="20">20</option>
+                  <option value="25">25</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="settings-note">
+              In the menu: Up/Down select, Enter then Y kills, C asks the app to close, / filters, S sorts, Esc leaves.
+              If the daemon is certain which process is freezing the machine it pauses it first; Esc resumes it, Enter kills it, and a second press of the hotkey before the menu appears kills it without waiting.
+              Hotkey, rows, look and pausing apply on save; the on/off switch and the private desktop need a daemon restart.
+            </div>
+          </article>
+        {/if}
+
         {#if visibleMediaRows.length}
           <article class:deleting={deletingMediaGroup} class:highlight={highlightedBindingId === "media-picker"} class="media-group" on:pointerenter={setCardHoverDirection}>
             <div class="media-group-head">
@@ -3024,92 +3176,6 @@
 
             <div class="settings-note">
               Elevated startup registers a Windows scheduled task with highest privileges and replaces the normal sign-in launch. Restarting as administrator shows a one-time Windows UAC prompt.
-            </div>
-          </article>
-
-          <article class="settings-card" on:pointerenter={setCardHoverDirection}>
-            <div class="settings-card-head">
-              <div>
-                <h3>Rescue menu</h3>
-                <p>A minimal process list and killer that still comes up when the machine is frozen and Task Manager will not.</p>
-              </div>
-              <span>{config.rescue.enabled ? "Enabled" : "Off"}</span>
-            </div>
-
-            <label class="inline-check">
-              <input
-                type="checkbox"
-                checked={config.rescue.enabled}
-                on:change={(event) => {
-                  config.rescue.enabled = event.currentTarget.checked;
-                  touchRescue();
-                }}
-              />
-              <span>Keep the rescue menu armed</span>
-            </label>
-
-            <div class="settings-fields">
-              <label>
-                <span>Rescue hotkey</span>
-                <input
-                  value={config.rescue.hotkey}
-                  placeholder="ctrl+alt+shift+end"
-                  on:focus={() => void suspendDaemonHotkeys()}
-                  on:blur={() => void invoke("send_daemon_command", { command: "resume_hotkeys" }).catch(() => undefined)}
-                  on:keydown={captureRescueHotkey}
-                  on:input={(event) => {
-                    config.rescue.hotkey = event.currentTarget.value;
-                    touchRescue();
-                  }}
-                />
-              </label>
-
-              <label>
-                <span>Rows shown</span>
-                <select
-                  value={String(config.rescue.row_count)}
-                  on:change={(event) => {
-                    config.rescue.row_count = Number(event.currentTarget.value);
-                    touchRescue();
-                  }}
-                >
-                  <option value="10">10</option>
-                  <option value="15">15</option>
-                  <option value="20">20</option>
-                  <option value="25">25</option>
-                </select>
-              </label>
-            </div>
-
-            <label class="inline-check">
-              <input
-                type="checkbox"
-                checked={config.rescue.use_private_desktop}
-                on:change={(event) => {
-                  config.rescue.use_private_desktop = event.currentTarget.checked;
-                  touchRescue();
-                }}
-              />
-              <span>Open on a private desktop (works over fullscreen games)</span>
-            </label>
-
-            <label class="inline-check">
-              <input
-                type="checkbox"
-                checked={config.rescue.auto_pause}
-                on:change={(event) => {
-                  config.rescue.auto_pause = event.currentTarget.checked;
-                  touchRescue();
-                }}
-              />
-              <span>Pause the process that is freezing the PC before opening the menu</span>
-            </label>
-
-            <div class="settings-note">
-              In the menu: Up/Down select, Enter then Y kills, C asks the app to close, / filters, S sorts, Esc leaves.
-              With pausing on, a process the daemon is certain is freezing the machine (a memory hog, a realtime spinner, a disk storm, a fork bomb) is frozen first so the screen can come back; Esc resumes it, Enter kills it, and pressing the hotkey a second time before the menu appears kills it without waiting.
-              Changing the hotkey, rows or pausing applies on save; turning the menu or the private desktop on or off needs a daemon restart.
-              Processes Windows itself depends on are refused, and a kill that cannot work says why instead of failing silently.
             </div>
           </article>
 

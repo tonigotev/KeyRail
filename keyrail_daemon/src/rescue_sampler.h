@@ -26,7 +26,7 @@ constexpr uint32_t kHistory = 8;
 enum RecordFlags : uint16_t {
     kFlagOwnsWindow = 1 << 0,    // has a visible top-level window
     kFlagHungWindow = 1 << 1,    // IsHungAppWindow said so (the authoritative signal)
-    kFlagHungByState = 1 << 2,   // owns a window, nothing runnable, nobody pumping
+    kFlagHungByState = 1 << 2,   // retired: never set (see the sampler for why); kept so the bit stays reserved
     kFlagPaging = 1 << 3,        // threads blocked on page-in: a thrash victim
     kFlagNew = 1 << 4,           // first tick seen, deltas not yet meaningful
     kFlagSelf = 1 << 5,          // this daemon

@@ -51,6 +51,7 @@ struct RescueSettings {
     // On the chord, pause a process the sampler is sure is freezing the
     // machine before showing the menu; Esc resumes it. See findCulprit.
     bool autoPause = true;
+    std::wstring style = L"modern";   // or "legacy": the original monospace look
     RescueWeights weights;
 };
 

@@ -144,6 +144,7 @@ std::string ControlPipe::dispatchCommand(const std::string& body) {
             else if (target == "clipboard_history") ok = openClipboardHistoryPicker(&report);
             else if (target == "rescue_open") ok = triggerRescue(&report);
             else if (target == "rescue_close") ok = dismissRescue(&report);
+            else if (target == "rescue_dump") ok = dumpRescueBitmap(&report);
             else report = L"unknown trigger target";
 
             json out;

@@ -46,6 +46,10 @@ OverlayStatus overlayStatus();
 // Closes the menu as Esc would (control pipe). False when it is not open.
 bool overlayDismiss();
 
+// Debug aid: renders the private surface (visible or not) and writes it as a
+// 32-bit BMP. Disk I/O by design; never called on the panic path.
+bool overlayDumpBitmap(const wchar_t* path);
+
 // The kill worker reports here; the line shows in the status bar. Copies the
 // text into fixed storage, so it is safe from any thread.
 void overlaySetResult(const wchar_t* text);

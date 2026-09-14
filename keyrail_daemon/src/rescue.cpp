@@ -118,6 +118,19 @@ bool dismissRescue(std::wstring* report) {
     return ok;
 }
 
+bool dumpRescueBitmap(std::wstring* report) {
+    wchar_t path[MAX_PATH];
+    const DWORD chars = GetTempPathW(MAX_PATH, path);
+    if (chars == 0 || chars > MAX_PATH - 24) {
+        if (report) *report = L"no temp path";
+        return false;
+    }
+    wcscat_s(path, L"keyrail-rescue.bmp");
+    const bool ok = g_started && rescue::overlayDumpBitmap(path);
+    if (report) *report = ok ? std::wstring(L"wrote ") + path : L"could not render the rescue surface";
+    return ok;
+}
+
 std::wstring describeRescueStatus() {
     if (!g_started) return L"rescue: not running\n";
 
