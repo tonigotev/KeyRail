@@ -19,6 +19,7 @@
 #include "clipboard_history.h"
 #include "config.h"
 #include "control_pipe.h"
+#include "daemon_control.h"
 #include "discord_bridge.h"
 #include "display_state.h"
 #include "hotkey_registry.h"
@@ -31,6 +32,27 @@ static constexpr UINT WM_KEYRAIL_SUSPEND = WM_APP + 3;
 static constexpr UINT WM_KEYRAIL_RESUME = WM_APP + 4;
 static constexpr wchar_t kSingleInstanceMutex[] = L"Local\\KeyRailDaemon";
 static constexpr wchar_t kRawInputWindowClass[] = L"KeyRailRawInputSink";
+
+static DWORD g_mainThreadId = 0;
+
+void requestDaemonRestart(const wchar_t* reason) {
+    wchar_t path[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) return;
+    wchar_t command[MAX_PATH + 32];
+    swprintf_s(command, L"\"%ls\" --restart", path);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // Inherits our token, so an elevated daemon comes back elevated.
+    if (CreateProcessW(nullptr, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+        wprintf(L"restarting: %ls\n", reason);
+        if (g_mainThreadId) PostThreadMessageW(g_mainThreadId, WM_KEYRAIL_QUIT, 0, 0);
+    } else {
+        wprintf(L"restart failed (error %lu): %ls\n", GetLastError(), reason);
+    }
+}
 
 struct DaemonState {
     HotkeyRegistry registry;
@@ -184,17 +206,27 @@ static void loadAndApply(DaemonState& state, bool keepPreviousOnFailure) {
     wprintf(L"%s", status.c_str());
 }
 
-int main() {
+int main(int argc, char** argv) {
+    bool restarting = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--restart") == 0) restarting = true;
+    }
+
     HANDLE singleInstance = CreateMutexW(nullptr, TRUE, kSingleInstanceMutex);
     if (!singleInstance) {
         return 1;
     }
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        CloseHandle(singleInstance);
-        return 0;
+        // A restart hands over from a daemon that is still shutting down: wait
+        // for its lock to be released (or abandoned) rather than bailing out.
+        if (!restarting || WaitForSingleObject(singleInstance, 20000) == WAIT_TIMEOUT) {
+            CloseHandle(singleInstance);
+            return 0;
+        }
     }
 
     DWORD mainThreadId = GetCurrentThreadId();
+    g_mainThreadId = mainThreadId;
     MSG bootstrapMsg;
     PeekMessageW(&bootstrapMsg, nullptr, WM_USER, WM_USER, PM_NOREMOVE);
 

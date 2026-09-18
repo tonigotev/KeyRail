@@ -1,4 +1,5 @@
 #include "media_sessions.h"
+#include "daemon_control.h"
 #include "browser_bridge.h"
 
 #include <windows.h>
@@ -75,3 +76,6 @@ int wmain() {
     stopBrowserMediaBridge();
     return 0;
 }
+
+// The diagnostic tool has no daemon to restart.
+void requestDaemonRestart(const wchar_t*) {}

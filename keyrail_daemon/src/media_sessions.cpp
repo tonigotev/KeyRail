@@ -1,6 +1,7 @@
 #include "media_sessions.h"
 
 #include "browser_bridge.h"
+#include "daemon_control.h"
 #include "display_state.h"
 
 #include <windows.h>
@@ -238,6 +239,7 @@ bool g_hasSelectedTarget = false;
 constexpr DWORD kThreadCheckIntervalMs = 10000;
 constexpr uint32_t kLeakGrowthThreshold = 20;       // threads gained in one interval
 constexpr uint32_t kThreadHardCap = 1500;
+constexpr uint32_t kRestartThreads = 500;   // leaked workers keep re-sending RPCs; only a restart drops them
 constexpr ULONGLONG kSuspendRetryMs = 10 * 60 * 1000;
 
 std::mutex g_healthMutex;
@@ -289,6 +291,19 @@ void checkForLeakedThreads() {
     if (threads == 0) return;
     const bool climbing = g_lastThreadCount && threads >= g_lastThreadCount + kLeakGrowthThreshold;
     const bool capped = threads >= kThreadHardCap;
+    if ((climbing || capped) && threads >= kRestartThreads) {
+        // Measured: 27,000 stuck workers went on to generate 31 million kernel
+        // RPC messages (26 GB of pool) over a day. Pausing new calls does not
+        // stop the ones already stuck, so the process hands over to a fresh copy.
+        g_healthNote = L"Windows media broker stopped answering and " + std::to_wstring(threads)
+            + L" worker threads are stuck; the daemon restarted itself to drop them.";
+        wprintf(L"media: %ls\n", g_healthNote.c_str());
+        requestDaemonRestart(L"leaked media broker workers");
+        g_windowsMediaSuspended = true;
+        g_windowsMediaRetryAt = now + kSuspendRetryMs;
+        g_lastThreadCount = threads;
+        return;
+    }
     if (climbing || capped) {
         g_windowsMediaSuspended = true;
         g_windowsMediaRetryAt = now + kSuspendRetryMs;
