@@ -4,6 +4,7 @@
 #include "display_state.h"
 
 #include <windows.h>
+#include <tlhelp32.h>
 #include <wincodec.h>
 #include <objidl.h>
 
@@ -223,6 +224,82 @@ std::vector<MediaTarget> g_lastKnownTargets;
 size_t g_pickerIndex = 0;
 bool g_pickerOpen = false;
 bool g_hasSelectedTarget = false;
+
+// Thread-leak guard for the Windows media broker.
+//
+// GlobalSystemMediaTransportControlsSessionManager::RequestAsync makes Windows
+// spin up a shell worker thread that talks to the media broker over RPC. When
+// that broker hangs (seen in the wild: it stops answering, and every caller on
+// the machine, browsers included, collects threads stuck waiting for a reply),
+// each poll leaks one or more threads that never exit. Polling once a second
+// for a day produced 29,000 threads, 1.7 GB, and a laggy PC. The daemon cannot
+// unstick the broker; it can notice its own thread count climbing and stop
+// making the calls, then try again later.
+constexpr DWORD kThreadCheckIntervalMs = 10000;
+constexpr uint32_t kLeakGrowthThreshold = 20;       // threads gained in one interval
+constexpr uint32_t kThreadHardCap = 1500;
+constexpr ULONGLONG kSuspendRetryMs = 10 * 60 * 1000;
+
+std::mutex g_healthMutex;
+bool g_windowsMediaSuspended = false;
+ULONGLONG g_windowsMediaRetryAt = 0;
+ULONGLONG g_lastThreadCheckAt = 0;
+uint32_t g_lastThreadCount = 0;
+uint32_t g_suspensions = 0;
+std::wstring g_healthNote;
+
+uint32_t ownThreadCount() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return 0;
+    const DWORD self = GetCurrentProcessId();
+    uint32_t count = 0;
+    THREADENTRY32 entry{};
+    entry.dwSize = sizeof(entry);
+    if (Thread32First(snapshot, &entry)) {
+        do {
+            if (entry.th32OwnerProcessID == self) ++count;
+        } while (Thread32Next(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return count;
+}
+
+// True while Windows media queries should be skipped. Lifts itself after the
+// retry interval so a recovered broker is picked up without a restart.
+bool windowsMediaOnHold() {
+    std::lock_guard<std::mutex> lock(g_healthMutex);
+    if (!g_windowsMediaSuspended) return false;
+    if (GetTickCount64() < g_windowsMediaRetryAt) return true;
+    g_windowsMediaSuspended = false;
+    g_lastThreadCount = 0;        // re-baseline after the pause
+    g_healthNote = L"Windows media queries resumed after a pause; watching for leaked threads.";
+    wprintf(L"media: retrying Windows media broker\n");
+    return false;
+}
+
+// Called after each poll. Cheap: one Toolhelp walk every ten seconds.
+void checkForLeakedThreads() {
+    const ULONGLONG now = GetTickCount64();
+    std::lock_guard<std::mutex> lock(g_healthMutex);
+    if (g_windowsMediaSuspended) return;
+    if (now - g_lastThreadCheckAt < kThreadCheckIntervalMs) return;
+    g_lastThreadCheckAt = now;
+
+    const uint32_t threads = ownThreadCount();
+    if (threads == 0) return;
+    const bool climbing = g_lastThreadCount && threads >= g_lastThreadCount + kLeakGrowthThreshold;
+    const bool capped = threads >= kThreadHardCap;
+    if (climbing || capped) {
+        g_windowsMediaSuspended = true;
+        g_windowsMediaRetryAt = now + kSuspendRetryMs;
+        ++g_suspensions;
+        g_healthNote = L"Windows media queries paused: the media broker is not answering and each query"
+            L" leaks a thread (daemon now at " + std::to_wstring(threads) + L" threads). Retrying in 10 minutes;"
+            L" a reboot clears the stuck broker.";
+        wprintf(L"media: %ls\n", g_healthNote.c_str());
+    }
+    g_lastThreadCount = threads;
+}
 
 std::mutex g_pollMutex;
 std::condition_variable g_pollCv;
@@ -1296,6 +1373,11 @@ void hideOverlay() {
 std::vector<MediaTarget> queryWindowsMediaTargets(std::wstring* report) {
     std::vector<MediaTarget> targets;
 
+    if (windowsMediaOnHold()) {
+        if (report) *report = L"Windows media sessions unavailable: the media broker is not responding (queries paused).";
+        return targets;
+    }
+
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
@@ -1639,6 +1721,7 @@ void publishTargets(std::vector<MediaTarget> fresh) {
 void mediaPollThreadMain() {
     for (;;) {
         publishTargets(listMediaTargetsLive(nullptr));
+        checkForLeakedThreads();
 
         std::unique_lock<std::mutex> lock(g_pollMutex);
         g_pollCv.wait_for(lock, std::chrono::milliseconds(kTargetPollIntervalMs),
@@ -1865,6 +1948,12 @@ bool mediaPlayPauseContextual(std::wstring* report) {
     if (!selectedTargetExists(report)) return controlSystemMediaFallback(MediaCommand::TogglePlayPause, report);
     bool ok = controlSelectedMedia(MediaCommand::TogglePlayPause, report);
     return ok ? true : controlSystemMediaFallback(MediaCommand::TogglePlayPause, report);
+}
+
+std::wstring describeMediaHealth() {
+    std::lock_guard<std::mutex> lock(g_healthMutex);
+    if (g_healthNote.empty()) return L"";
+    return L"media: " + g_healthNote + L"\n";
 }
 
 std::wstring describeMediaTargets() {

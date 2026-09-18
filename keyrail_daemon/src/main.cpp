@@ -157,6 +157,7 @@ static std::wstring getStatus(DaemonState& state) {
     if (!event.empty()) status += event + L"\n";
     status += state.registry.rawInputDebugStatus();
     status += describeOverlayVisibility();
+    status += describeMediaHealth();
     status += describeRescueStatus();
     return status;
 }

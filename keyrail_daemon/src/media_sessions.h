@@ -47,6 +47,10 @@ void warmMediaOverlay();
 void startMediaTargetPolling();
 void stopMediaTargetPolling();
 
+// One line for the daemon status when Windows media queries are on hold, empty
+// otherwise. See the thread-leak guard in media_sessions.cpp.
+std::wstring describeMediaHealth();
+
 std::vector<MediaTarget> listMediaTargets(std::wstring* report = nullptr);
 
 bool openMediaPicker(std::wstring* report = nullptr);
