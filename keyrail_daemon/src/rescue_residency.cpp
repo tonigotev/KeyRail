@@ -40,11 +40,17 @@ void pin(const ProcRecord& compositor) {
 
     HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_SET_QUOTA, FALSE, compositor.pid);
     if (!process) {
-        const DWORD error = GetLastError();
-        setDetail(error == ERROR_ACCESS_DENIED
-            ? L"compositor not pinned: needs an elevated daemon"
-            : L"compositor not pinned: OpenProcess failed");
-        log(L"%ls (dwm.exe pid %u, error %lu)", g_status.detail, compositor.pid, error);
+        const DWORD code = GetLastError();
+        // Access denied without elevation is the normal, supported state, not a
+        // fault: the settings UI flags any status carrying "error" or "failed"
+        // as needing attention, so this branch must not use those words.
+        if (code == ERROR_ACCESS_DENIED) {
+            setDetail(L"compositor not pinned: only an elevated daemon can do that");
+            log(L"%ls (dwm.exe pid %u)", g_status.detail, compositor.pid);
+        } else {
+            setDetail(L"compositor not pinned: OpenProcess failed");
+            log(L"%ls (dwm.exe pid %u, code %lu)", g_status.detail, compositor.pid, code);
+        }
         ReleaseSRWLockExclusive(&g_lock);
         return;
     }
