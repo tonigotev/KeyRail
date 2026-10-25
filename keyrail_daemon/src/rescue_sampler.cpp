@@ -1,6 +1,7 @@
 #include "rescue_sampler.h"
 
 #include "rescue_nt.h"
+#include "perf_watch.h"
 
 #include <algorithm>
 #include <atomic>
@@ -387,6 +388,7 @@ void scoreSnapshot(Snapshot& snapshot, const RescueWeights& weights) {
 }
 
 void tick() {
+    perf::Scope scope(L"rescue sample (process + window walk)");
     const int64_t started = qpcNow();
 
     ULONG returned = 0;
@@ -495,6 +497,9 @@ void tick() {
 
 void growIfWanted() {
     if (g_wantBufferBytes == 0 || g_busy.load()) return;
+    // VirtualLock and a raised working-set floor both make the memory manager
+    // find physical pages; under pressure that can take a while.
+    perf::Scope scope(L"rescue buffer growth (VirtualLock + working-set floor)");
     const uint32_t wanted = (std::min)(g_wantBufferBytes, kMaxBufferBytes);
     g_wantBufferBytes = 0;
     if (wanted <= g_bufferBytes) return;

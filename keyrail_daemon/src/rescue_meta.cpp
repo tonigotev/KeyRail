@@ -2,6 +2,7 @@
 
 #include "rescue_log.h"
 #include "rescue_residency.h"
+#include "perf_watch.h"
 
 #include <algorithm>
 #include <atomic>
@@ -104,6 +105,7 @@ bool resolve(uint32_t pid, wchar_t (&friendly)[kFriendlyChars]) {
 // One pass: evict entries whose (pid, createTime) no longer match, then
 // resolve a handful of unresolved processes from the latest snapshot.
 void tick() {
+    perf::Scope scope(L"name cache (reads app descriptions off disk)");
     const Snapshot* snapshot = snapshotAcquire();
     if (!snapshot) return;
 

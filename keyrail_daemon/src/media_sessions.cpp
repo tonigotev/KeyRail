@@ -2,6 +2,8 @@
 
 #include "browser_bridge.h"
 #include "daemon_control.h"
+#include "rescue_sampler.h"
+#include "perf_watch.h"
 #include "display_state.h"
 
 #include <windows.h>
@@ -65,7 +67,19 @@ constexpr DWORD kOverlayKeepTimeout = 0xFFFFFFFF;
 // Gap between finished target queries. A full query costs ~12ms, so once a
 // second is cheap, and sleeping between completions rather than on a fixed
 // schedule means a slow browser reply throttles the loop instead of stacking up.
+// Polling once a second kept the picker warm but cost ~4% of a core around
+// the clock, whether or not anything used media. The fast cadence now only
+// runs while media is actually in play: the picker is open, a media action
+// just ran, or something asked for a refresh.
 constexpr DWORD kTargetPollIntervalMs = 1000;
+constexpr DWORD kIdlePollIntervalMs = 5000;
+constexpr DWORD kQuietPollIntervalMs = 15000;
+constexpr DWORD kDormantPollIntervalMs = 30000;
+constexpr ULONGLONG kStayFastMs = 30000;
+// Nothing playing and nobody asking: back off rather than keep paying for a
+// broker round trip that returns an empty list every time.
+constexpr uint32_t kQuietAfterEmptyPolls = 3;
+constexpr uint32_t kDormantAfterEmptyPolls = 10;
 
 // Toast (message overlay) layout. The card is a single horizontal row: an accent
 // badge on the left and the message text beside it, both vertically centered as a
@@ -251,6 +265,19 @@ uint32_t g_suspensions = 0;
 std::wstring g_healthNote;
 
 uint32_t ownThreadCount() {
+    // The rescue sampler already walks every process once a second and records
+    // thread counts, so our own is there for free. Toolhelp is the fallback for
+    // when the rescue menu is switched off: it snapshots every thread on the
+    // machine, which is far too much work to repeat on a timer.
+    if (const rescue::Snapshot* snapshot = rescue::snapshotAcquire()) {
+        uint32_t threads = 0;
+        if (const rescue::ProcRecord* self = rescue::findRecord(*snapshot, GetCurrentProcessId())) {
+            threads = self->threadCount;
+        }
+        rescue::snapshotRelease(snapshot);
+        if (threads) return threads;
+    }
+
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
     if (snapshot == INVALID_HANDLE_VALUE) return 0;
     const DWORD self = GetCurrentProcessId();
@@ -316,6 +343,13 @@ void checkForLeakedThreads() {
     g_lastThreadCount = threads;
 }
 
+std::atomic<ULONGLONG> g_pollFastUntil{0};
+std::atomic<uint32_t> g_emptyPolls{0};
+
+void keepPollingFast() {
+    g_pollFastUntil.store(GetTickCount64() + kStayFastMs);
+}
+
 std::mutex g_pollMutex;
 std::condition_variable g_pollCv;
 std::thread g_pollThread;
@@ -361,7 +395,53 @@ std::wstring lowerCopy(std::wstring value) {
     return value;
 }
 
+// Album art costs a WinRT round trip, a stream read and a full image decode.
+// It only changes when the track does, so it is cached on what identifies the
+// track. Polling once a second used to pay that price every second, for every
+// session, forever.
+struct ArtworkCacheEntry {
+    std::wstring key;
+    std::vector<uint8_t> bgra;
+    int width = 0;
+    int height = 0;
+};
+
+std::mutex g_artworkMutex;
+std::vector<ArtworkCacheEntry> g_artworkCache;   // tiny: one per active session
+
+std::wstring artworkKey(const MediaTarget& target) {
+    return target.appId + L"|" + target.title + L"|" + target.artist;
+}
+
+bool artworkFromCache(const std::wstring& key, MediaTarget& target) {
+    std::lock_guard<std::mutex> lock(g_artworkMutex);
+    for (const ArtworkCacheEntry& entry : g_artworkCache) {
+        if (entry.key != key) continue;
+        target.artworkBgra = entry.bgra;
+        target.artworkWidth = entry.width;
+        target.artworkHeight = entry.height;
+        return true;
+    }
+    return false;
+}
+
+void artworkToCache(const std::wstring& key, const MediaTarget& target) {
+    std::lock_guard<std::mutex> lock(g_artworkMutex);
+    for (ArtworkCacheEntry& entry : g_artworkCache) {
+        if (entry.key != key) continue;
+        entry.bgra = target.artworkBgra;
+        entry.width = target.artworkWidth;
+        entry.height = target.artworkHeight;
+        return;
+    }
+    if (g_artworkCache.size() >= 8) g_artworkCache.erase(g_artworkCache.begin());
+    g_artworkCache.push_back({key, target.artworkBgra, target.artworkWidth, target.artworkHeight});
+}
+
 void fetchSmtcThumbnail(const GlobalSystemMediaTransportControlsSession& session, MediaTarget& target) {
+    const std::wstring key = artworkKey(target);
+    if (artworkFromCache(key, target)) return;
+
     try {
         auto props = session.TryGetMediaPropertiesAsync().get();
         auto thumbRef = props.Thumbnail();
@@ -379,8 +459,11 @@ void fetchSmtcThumbnail(const GlobalSystemMediaTransportControlsSession& session
         reader.ReadBytes(winrt::array_view<uint8_t>(bytes));
         reader.DetachStream();
         decodeImageBytesIntoArtwork(bytes, target);
+        artworkToCache(key, target);
     } catch (...) {
-        // Leave artworkBgra empty on any failure.
+        // Leave artworkBgra empty on any failure. Cache the miss too, so a
+        // session without art is not re-asked on every poll.
+        artworkToCache(key, target);
     }
 }
 
@@ -1706,6 +1789,8 @@ bool sameTargetsForDisplay(const std::vector<MediaTarget>& a, const std::vector<
 // redraw is skipped when nothing visible changed, so an idle picker is not
 // repainted once a second for no reason.
 void publishTargets(std::vector<MediaTarget> fresh) {
+    if (fresh.empty()) g_emptyPolls.fetch_add(1);
+    else g_emptyPolls.store(0);
     std::lock_guard<std::mutex> lock(g_pickerMutex);
     g_lastKnownTargets = fresh;
     if (!g_pickerOpen) return;
@@ -1735,11 +1820,25 @@ void publishTargets(std::vector<MediaTarget> fresh) {
 
 void mediaPollThreadMain() {
     for (;;) {
-        publishTargets(listMediaTargetsLive(nullptr));
-        checkForLeakedThreads();
+        {
+            perf::Scope scope(L"media poll (Windows media broker + browser targets)");
+            publishTargets(listMediaTargetsLive(nullptr));
+        }
+        {
+            // A system-wide thread snapshot; it walks every process on the box.
+            perf::Scope scope(L"thread-leak check (system thread snapshot)");
+            checkForLeakedThreads();
+        }
+
+        const bool fast = GetTickCount64() < g_pollFastUntil.load() || mediaPickerIsOpen();
+        const uint32_t empty = g_emptyPolls.load();
+        DWORD interval = kIdlePollIntervalMs;
+        if (fast) interval = kTargetPollIntervalMs;
+        else if (empty >= kDormantAfterEmptyPolls) interval = kDormantPollIntervalMs;
+        else if (empty >= kQuietAfterEmptyPolls) interval = kQuietPollIntervalMs;
 
         std::unique_lock<std::mutex> lock(g_pollMutex);
-        g_pollCv.wait_for(lock, std::chrono::milliseconds(kTargetPollIntervalMs),
+        g_pollCv.wait_for(lock, std::chrono::milliseconds(interval),
             [] { return !g_pollRunning || g_pollWakeRequested; });
         if (!g_pollRunning) return;
         g_pollWakeRequested = false;
@@ -1747,6 +1846,8 @@ void mediaPollThreadMain() {
 }
 
 void requestMediaTargetRefresh() {
+    keepPollingFast();
+    g_emptyPolls.store(0);
     std::lock_guard<std::mutex> lock(g_pollMutex);
     g_pollWakeRequested = true;
     g_pollCv.notify_all();
@@ -1786,8 +1887,10 @@ bool openMediaPicker(std::wstring* report) {
         showPickerOverlay(g_pickerTargets, g_pickerIndex, 5000, warmingUp);
     }
 
-    // Only matters right after startup, before the poller has published a list.
-    if (warmingUp) requestMediaTargetRefresh();
+    // Always refresh on open: the idle cadence means the cached list can be a
+    // few seconds old, and the overlay repaints when the fresh one lands.
+    requestMediaTargetRefresh();
+    (void)warmingUp;
 
     if (report) *report = L"Media picker opened.";
     return true;

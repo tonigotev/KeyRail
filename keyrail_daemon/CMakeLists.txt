@@ -29,6 +29,7 @@ add_executable(keyraild
     src/hotkey.cpp
     src/hotkey_registry.cpp
     src/media_sessions.cpp
+    src/perf_watch.cpp
     src/rescue.cpp
     src/rescue_kill.cpp
     src/rescue_meta.cpp
@@ -49,6 +50,9 @@ add_executable(media_list
     src/display_state.cpp
     src/media_list_main.cpp
     src/media_sessions.cpp
+    src/perf_watch.cpp
+    src/rescue_nt.cpp
+    src/rescue_sampler.cpp
     src/synthetic_hotkey_suppression.cpp
 )
 
@@ -60,6 +64,7 @@ target_link_libraries(media_list PRIVATE bcrypt gdi32 gdiplus runtimeobject shel
 # process table the overlay would show, rescue_stress produces the failure
 # modes it is meant to survive. build.ps1 does not copy them into dist\.
 add_executable(rescue_probe
+    src/perf_watch.cpp
     src/rescue_nt.cpp
     src/rescue_probe_main.cpp
     src/rescue_sampler.cpp

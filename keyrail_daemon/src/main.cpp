@@ -24,6 +24,7 @@
 #include "display_state.h"
 #include "hotkey_registry.h"
 #include "media_sessions.h"
+#include "perf_watch.h"
 #include "rescue.h"
 
 static constexpr UINT WM_KEYRAIL_RELOAD = WM_APP + 1;
@@ -180,6 +181,7 @@ static std::wstring getStatus(DaemonState& state) {
     status += state.registry.rawInputDebugStatus();
     status += describeOverlayVisibility();
     status += describeMediaHealth();
+    status += perf::describe();
     status += describeRescueStatus();
     return status;
 }
@@ -243,6 +245,7 @@ int main(int argc, char** argv) {
     }
     startDiscordBridge();
     startBrowserMediaBridge();
+    perf::startHeartbeat();
     startClipboardHistory();
     warmMediaOverlay();
     startMediaTargetPolling();
@@ -318,6 +321,7 @@ int main(int argc, char** argv) {
     pipe.stop();
     stopRescue();
     stopMediaTargetPolling();
+    perf::stopHeartbeat();
     stopClipboardHistory();
     stopBrowserMediaBridge();
     stopDiscordBridge();

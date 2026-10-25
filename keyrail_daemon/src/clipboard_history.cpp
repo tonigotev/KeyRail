@@ -1,5 +1,7 @@
 #include "clipboard_history.h"
 
+#include "perf_watch.h"
+
 #include "display_state.h"
 #include "synthetic_hotkey_suppression.h"
 
@@ -246,6 +248,7 @@ std::wstring historyDir() {
 }
 
 void saveTextHistory() {
+    perf::Scope scope(L"clipboard history save");
     CreateDirectoryW(historyDir().c_str(), nullptr);
     json root = json::array();
     {
