@@ -253,10 +253,21 @@ bool g_hasSelectedTarget = false;
 constexpr DWORD kThreadCheckIntervalMs = 10000;
 constexpr uint32_t kLeakGrowthThreshold = 20;       // threads gained in one interval
 constexpr uint32_t kThreadHardCap = 1500;
+// A healthy broker answers in a few milliseconds. Measured on a machine with
+// a sick one: 10,976 calls over three weeks took 250 ms to 3 s each. Nothing
+// is gained by asking again every five seconds, and the browser bridge keeps
+// serving tab targets regardless, so a slow broker is simply dropped for a
+// while.
+constexpr uint32_t kSlowBrokerMs = 700;
+constexpr uint32_t kSlowBrokerStrikes = 3;
+constexpr uint32_t kSlowBrokerWindow = 5;
 constexpr uint32_t kRestartThreads = 500;   // leaked workers keep re-sending RPCs; only a restart drops them
 constexpr ULONGLONG kSuspendRetryMs = 10 * 60 * 1000;
 
 std::mutex g_healthMutex;
+uint32_t g_brokerRecent = 0;       // bitfield: one bit per recent call, 1 = slow
+uint32_t g_brokerCalls = 0;
+uint32_t g_brokerSlowPauses = 0;
 bool g_windowsMediaSuspended = false;
 ULONGLONG g_windowsMediaRetryAt = 0;
 ULONGLONG g_lastThreadCheckAt = 0;
@@ -301,9 +312,39 @@ bool windowsMediaOnHold() {
     if (GetTickCount64() < g_windowsMediaRetryAt) return true;
     g_windowsMediaSuspended = false;
     g_lastThreadCount = 0;        // re-baseline after the pause
-    g_healthNote = L"Windows media queries resumed after a pause; watching for leaked threads.";
+    g_brokerRecent = 0;
+    g_brokerCalls = 0;
+    g_healthNote = L"Windows media queries resumed after a pause; watching for leaked threads and slow replies.";
     wprintf(L"media: retrying Windows media broker\n");
     return false;
+}
+
+// Called with how long the broker took to answer. Three slow replies out of
+// the last five and the daemon stops asking for a while.
+void noteBrokerLatency(uint32_t millis) {
+    std::lock_guard<std::mutex> lock(g_healthMutex);
+    if (g_windowsMediaSuspended) return;
+
+    g_brokerRecent = ((g_brokerRecent << 1) | (millis >= kSlowBrokerMs ? 1u : 0u))
+        & ((1u << kSlowBrokerWindow) - 1u);
+    ++g_brokerCalls;
+    if (g_brokerCalls < kSlowBrokerWindow) return;
+
+    uint32_t slow = 0;
+    for (uint32_t bit = 0; bit < kSlowBrokerWindow; ++bit) {
+        if (g_brokerRecent & (1u << bit)) ++slow;
+    }
+    if (slow < kSlowBrokerStrikes) return;
+
+    g_windowsMediaSuspended = true;
+    g_windowsMediaRetryAt = GetTickCount64() + kSuspendRetryMs;
+    ++g_brokerSlowPauses;
+    g_healthNote = L"Windows media queries paused: the media broker took "
+        + std::to_wstring(millis) + L" ms to answer and " + std::to_wstring(slow)
+        + L" of the last " + std::to_wstring(kSlowBrokerWindow)
+        + L" calls were slow. Browser tab targets keep working. Retrying in 10 minutes;"
+          L" a reboot clears a stuck broker.";
+    wprintf(L"media: %ls\n", g_healthNote.c_str());
 }
 
 // Called after each poll. Cheap: one Toolhelp walk every ten seconds.
@@ -1476,9 +1517,11 @@ std::vector<MediaTarget> queryWindowsMediaTargets(std::wstring* report) {
         return targets;
     }
 
+    const ULONGLONG brokerStart = GetTickCount64();
     try {
         winrt::init_apartment(winrt::apartment_type::multi_threaded);
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
+        noteBrokerLatency(static_cast<uint32_t>(GetTickCount64() - brokerStart));
         auto sessions = manager.GetSessions();
 
         for (uint32_t i = 0; i < sessions.Size(); ++i) {
@@ -1526,8 +1569,10 @@ std::vector<MediaTarget> queryWindowsMediaTargets(std::wstring* report) {
                 : L"Found " + std::to_wstring(targets.size()) + L" Windows media session(s).";
         }
     } catch (const winrt::hresult_error& ex) {
+        noteBrokerLatency(static_cast<uint32_t>(GetTickCount64() - brokerStart));
         if (report) *report = L"Windows media session query failed: " + std::wstring(ex.message().c_str());
     } catch (...) {
+        noteBrokerLatency(static_cast<uint32_t>(GetTickCount64() - brokerStart));
         if (report) *report = L"Windows media session query failed.";
     }
 
@@ -2070,8 +2115,12 @@ bool mediaPlayPauseContextual(std::wstring* report) {
 
 std::wstring describeMediaHealth() {
     std::lock_guard<std::mutex> lock(g_healthMutex);
-    if (g_healthNote.empty()) return L"";
-    return L"media: " + g_healthNote + L"\n";
+    std::wstring out;
+    if (!g_healthNote.empty()) out = L"media: " + g_healthNote + L"\n";
+    if (g_brokerSlowPauses) {
+        out += L"  broker paused for being slow " + std::to_wstring(g_brokerSlowPauses) + L"x since start\n";
+    }
+    return out;
 }
 
 std::wstring describeMediaTargets() {

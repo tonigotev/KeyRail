@@ -1,5 +1,7 @@
 #include "perf_watch.h"
 
+#include "rescue_sampler.h"
+
 #include <atomic>
 #include <cstdio>
 #include <mutex>
@@ -9,9 +11,14 @@ namespace {
 
 constexpr uint32_t kSlots = 48;
 constexpr uint32_t kTextChars = 160;
-constexpr DWORD kHeartbeatMs = 250;
-// A wake-up this late means the machine itself stopped scheduling us.
-constexpr uint32_t kStallMs = 1200;
+// A game at 60 fps draws a frame every 17 ms, so a quarter-second cadence
+// cannot see a hitch a player feels. This wakes often enough to notice one and
+// still costs nothing measurable.
+constexpr DWORD kHeartbeatMs = 50;
+constexpr uint32_t kStallMs = 200;
+// A stall rarely comes alone; log the first and count the rest rather than
+// writing a hundred lines for one bad second.
+constexpr uint32_t kStallQuietMs = 3000;
 
 struct Entry {
     wchar_t text[kTextChars];
@@ -87,24 +94,65 @@ uint32_t millisSince(int64_t start) {
     return static_cast<uint32_t>((now() - start) * 1000 / g_frequency.QuadPart);
 }
 
+// What else the machine was doing, so a stall line is actionable instead of
+// just alarming. The rescue sampler already has this; nothing extra is walked.
+void describeSystemLoad(wchar_t* out, size_t chars) {
+    out[0] = 0;
+    const rescue::Snapshot* snapshot = rescue::snapshotAcquire();
+    if (!snapshot) return;
+
+    const rescue::ProcRecord* busiest = nullptr;
+    for (uint32_t i = 0; i < snapshot->count; ++i) {
+        const rescue::ProcRecord& record = snapshot->records[i];
+        if (!busiest || record.cpuCores > busiest->cpuCores) busiest = &record;
+    }
+    if (busiest) {
+        swprintf_s(out, chars, L"; busiest was %ls at %.0f%% of a core, %.0f hard faults/s system-wide",
+            busiest->image, busiest->cpuCores * 100.0, snapshot->totalHardFaults);
+    }
+    rescue::snapshotRelease(snapshot);
+}
+
 DWORD WINAPI heartbeatThread(LPVOID) {
     SetThreadDescription(GetCurrentThread(), L"keyrail-perf-heartbeat");
     ULONGLONG previous = GetTickCount64();
+    ULONGLONG quietUntil = 0;
+    uint32_t suppressed = 0;
+    uint32_t worstSuppressed = 0;
     for (;;) {
         if (WaitForSingleObject(g_heartbeatStop, kHeartbeatMs) == WAIT_OBJECT_0) break;
         const ULONGLONG current = GetTickCount64();
         const ULONGLONG elapsed = current - previous;
         previous = current;
-        if (elapsed >= kStallMs) {
-            // Was KeyRail in the middle of something when the machine stopped?
-            const uint32_t busyAt = g_busyUntilTick.load();
-            const bool ours = busyAt != 0 && static_cast<ULONGLONG>(busyAt) + elapsed >= current;
-            wchar_t text[kTextChars];
-            swprintf_s(text, L"the whole machine stalled for %llu ms (%ls)", elapsed,
-                ours ? L"KeyRail was mid-operation; see the line above"
-                     : L"nothing in KeyRail was running - the stall came from elsewhere");
-            note(text, 0);
+        if (elapsed < kStallMs) {
+            if (suppressed && current >= quietUntil) {
+                wchar_t text[kTextChars];
+                swprintf_s(text, L"...and %u more hitches in that burst, worst %u ms", suppressed, worstSuppressed);
+                note(text, 0);
+                suppressed = 0;
+                worstSuppressed = 0;
+            }
+            continue;
         }
+
+        if (current < quietUntil) {
+            ++suppressed;
+            if (elapsed > worstSuppressed) worstSuppressed = static_cast<uint32_t>(elapsed);
+            continue;
+        }
+        quietUntil = current + kStallQuietMs;
+
+        // Was KeyRail in the middle of something when the machine stopped?
+        const uint32_t busyAt = g_busyUntilTick.load();
+        const bool ours = busyAt != 0 && static_cast<ULONGLONG>(busyAt) + elapsed >= current;
+        wchar_t load[96];
+        describeSystemLoad(load, 96);
+        wchar_t text[kTextChars];
+        swprintf_s(text, L"stutter: this thread was %llu ms late (%ls)%ls", elapsed,
+            ours ? L"KeyRail was mid-operation; see the line above"
+                 : L"nothing in KeyRail was running - it came from elsewhere",
+            load);
+        note(text, 0);
     }
     return 0;
 }
